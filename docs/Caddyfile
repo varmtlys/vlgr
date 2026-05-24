@@ -1,0 +1,18 @@
+# VLGR Tunnel
+# Поместить в /etc/caddy/Caddyfile или импортировать в основной конфиг
+
+# WebSocket endpoint для VLGR-клиентов (подключение из клиента к серверу)
+tunnel.domain.com {
+    reverse_proxy 127.0.0.1:4443
+}
+
+# Публичные HTTP-запросы через поддомены туннелей
+# Клиент получает URL вида a3f8b2c1.tunnel.domain.com
+# Внешний пользователь стучится по этому URL → Caddy → VLGR → клиентский localhost
+*.tunnel.domain.com {
+    # DNS-01 challenge через Cloudflare для wildcard-сертификата
+    tls {
+        dns cloudflare {env.CF_API_TOKEN}
+    }
+    reverse_proxy 127.0.0.1:8080
+}
