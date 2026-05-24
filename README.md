@@ -1,94 +1,85 @@
-# VLGR — аналог ngrok на Go
+# VLGR — ngrok alternative in Go
 
-VLGR (созвучно с «вульгар» в хорошем смысле — простая, грубая утилита) — это HTTP-туннель, который позволяет выставить ваш локальный сервер в интернет через публичный сервер-посредник. Полный аналог [ngrok](https://ngrok.com), написанный на Go.
-
----
-
-## Оглавление
-
-1. [Как это работает (общая схема)](#как-это-работает-общая-схема)
-2. [Структура проекта](#структура-проекта)
-3. [Протокол](#протокол)
-4. [Сервер — подробный разбор](#сервер--подробный-разбор)
-5. [Клиент — подробный разбор](#клиент--подробный-разбор)
-6. [Установка и запуск](#установка-и-запуск)
-7. [Пример использования](#пример-использования)
-8. [Поток данных на примере запроса](#поток-данных-на-примере-запроса)
-9. [Флаги командной строки](#флаги-командной-строки)
+VLGR is an HTTP tunnel that exposes your local server to the internet through a public relay server. A full [ngrok](https://ngrok.com) clone written in Go.
 
 ---
 
-## Как это работает (общая схема)
+## Table of Contents
 
-Представь: у тебя на ноутбуке запущен веб-сервер на `localhost:3000`. Ты хочешь показать его другу через интернет, но у тебя нет белого IP, и сервер спрятан за NAT. VLGR решает эту проблему.
+1. [How It Works](#how-it-works)
+2. [Project Structure](#project-structure)
+3. [Protocol](#protocol)
+4. [Server — Deep Dive](#server--deep-dive)
+5. [Client — Deep Dive](#client--deep-dive)
+6. [Installation & Quick Start](#installation--quick-start)
+7. [Request Flow (Step by Step)](#request-flow-step-by-step)
+8. [CLI Flags](#cli-flags)
+9. [Production Deployment](#production-deployment)
 
-Архитектура состоит из трёх участников:
+---
+
+## How It Works
+
+You run a web server on `localhost:3000`. No public IP, behind NAT. VLGR exposes it to the internet through a relay server.
 
 ```
-┌──────────────────┐          WebSocket           ┌─────────────────────┐
-│   VLGR Client    │◄════════════════════════════►│    VLGR Server       │
-│   (твой ноутбук) │    контрольный канал          │    (VPS с белым IP)  │
-│                  │                               │                     │
-│  localhost:3000  │                               │  :4443  WebSocket   │
-│                  │                               │  :8080  HTTP        │
-└──────────────────┘                               └──────────┬──────────┘
-                                                              │
-                                                       HTTPS запрос
-                                                              │
-                                                    ┌─────────┴─────────┐
-                                                    │  Внешний           │
-                                                    │  пользователь      │
-                                                    │  (браузер, curl)   │
-                                                    └───────────────────┘
+┌──────────────────┐         WebSocket          ┌─────────────────────┐
+│   VLGR Client    │◄══════════════════════════►│    VLGR Server       │
+│   (your laptop)  │     control channel         │    (VPS, public IP)  │
+│                  │                             │                     │
+│  localhost:3000  │                             │  :4443  WebSocket   │
+│                  │                             │  :8080  HTTP        │
+└──────────────────┘                             └──────────┬──────────┘
+                                                            │
+                                                     HTTPS request
+                                                            │
+                                                  ┌─────────┴─────────┐
+                                                  │  External user     │
+                                                  │  (browser, curl)   │
+                                                  └───────────────────┘
 ```
 
-**Ключевая идея**: клиент устанавливает постоянное WebSocket-соединение с сервером. Сервер выдаёт клиенту уникальный публичный URL (например, `a3f8b2c1.localhost:8080`). Когда кто-то из интернета стучится по этому URL, сервер принимает HTTP-запрос, упаковывает его в бинарный фрейм, отправляет клиенту через WebSocket. Клиент распаковывает запрос, проксирует его на `localhost:3000`, получает ответ, упаковывает обратно и отправляет серверу. Сервер возвращает ответ внешнему пользователю.
-
-Внешнему пользователю кажется, что он общается напрямую с сервером — он ничего не знает о твоём ноутбуке.
+The client opens a persistent WebSocket to the server. The server assigns a unique public URL (e.g., `a3f8b2c1.tunnel.domain.com`). When an external user hits that URL, the server serializes the HTTP request into a binary frame, sends it to the client over WebSocket. The client forwards it to `localhost:3000`, serializes the response, and sends it back. The server returns the response to the external user — who sees a normal HTTP exchange.
 
 ---
 
-## Структура проекта
+## Project Structure
 
 ```
 vlgr/
-├── go.mod                          # Модуль Go, единственная внешняя зависимость — gorilla/websocket
+├── go.mod
 ├── .gitignore
+├── README.md
+├── GETTING_STARTED.md
 │
 ├── cmd/
-│   ├── server/
-│   │   └── main.go                 # Точка входа сервера
-│   └── client/
-│       └── main.go                 # Точка входа клиента
+│   ├── server/main.go              # Server entry point
+│   └── client/main.go              # Client entry point
 │
 ├── internal/
-│   ├── protocol/
-│   │   └── protocol.go             # Бинарный протокол: фрейминг, сериализация HTTP
+│   ├── protocol/protocol.go        # Binary protocol: framing, HTTP serialization
 │   ├── server/
-│   │   ├── registry.go             # Реестр активных туннелей (subdomain → Tunnel)
-│   │   ├── handler.go              # Обработчик WebSocket-соединения клиента
-│   │   └── proxy.go                # Reverse proxy — принимает внешние HTTP-запросы
+│   │   ├── registry.go             # Tunnel registry (subdomain → Tunnel)
+│   │   ├── handler.go              # Client WebSocket handler
+│   │   └── proxy.go                # Reverse proxy for incoming HTTP
 │   └── client/
-│       └── tunnel.go               # Логика клиента: коннект, регистрация, проксирование
+│       └── tunnel.go               # Client logic: connect, register, proxy
 │
-└── README.md                       # Этот файл
+├── scripts/
+│   ├── build.ps1                   # Build for Windows + Linux (PowerShell)
+│   └── build.sh                    # Build for Linux + Windows (Bash)
+│
+└── docs/
+    └── Caddyfile                   # Caddy config reference
 ```
-
-**Почему такое разделение?**
-
-- `cmd/` — только точки входа. Никакой бизнес-логики, только парсинг флагов и запуск. По конвенции Go: один пакет `main` на исполняемый файл.
-- `internal/` — весь переиспользуемый код. Go не позволит импортировать `internal` извне модуля — это защита от случайного использования.
-- `internal/protocol/` — протокол общий для клиента и сервера. Оба импортируют его.
-- `internal/server/` — логика сервера (три файла — три зоны ответственности).
-- `internal/client/` — логика клиента.
 
 ---
 
-## Протокол
+## Protocol
 
-### Бинарный фрейм
+### Binary frame
 
-Каждое сообщение между клиентом и сервером упаковывается в бинарный фрейм фиксированного формата:
+Every message is wrapped in a fixed binary frame:
 
 ```
 ┌──────────┬──────────┬────────────┬──────────┬──────────────┐
@@ -98,492 +89,259 @@ vlgr/
 └──────────┴──────────┴────────────┴──────────┴──────────────┘
 ```
 
-**Заголовок всегда 21 байт** (1 + 8 + 8 + 4). Затем идёт полезная нагрузка переменной длины.
+**Header is always 21 bytes** (1 + 8 + 8 + 4). Payload follows.
 
-| Поле | Размер | Назначение |
+| Field | Size | Purpose |
 |---|---|---|
-| `Type` | 1 байт | Тип сообщения (см. таблицу ниже) |
-| `TunnelID` | 8 байт | ID туннеля. Позволяет мультиплексировать несколько туннелей в одном WebSocket-соединении |
-| `RequestID` | 8 байт | Уникальный ID запроса. Нужен для сопоставления HTTP-запроса и HTTP-ответа |
-| `PayloadLen` | 4 байта | Длина полезной нагрузки в байтах |
-| `Payload` | N байт | Сериализованные данные (зависит от типа сообщения) |
+| `Type` | 1 B | Message type |
+| `TunnelID` | 8 B | Tunnel identifier for multiplexing |
+| `RequestID` | 8 B | Unique request ID for matching request↔response |
+| `PayloadLen` | 4 B | Payload length in bytes |
+| `Payload` | N B | Serialized data (type-dependent) |
 
-### Типы сообщений
+### Message types
 
-| Код | Константа | Отправитель | Назначение |
+| Code | Constant | Direction | Purpose |
 |---|---|---|---|
-| `0x01` | `MsgAuth` | Клиент → Сервер | Аутентификация. Payload = токен (строка) |
-| `0x02` | `MsgAuthOK` | Сервер → Клиент | Аутентификация успешна |
-| `0x03` | `MsgAuthErr` | Сервер → Клиент | Ошибка аутентификации |
-| `0x04` | `MsgRegister` | Клиент → Сервер | Регистрация туннеля. Payload = порт + опциональный subdomain |
-| `0x05` | `MsgRegisterOK` | Сервер → Клиент | Туннель создан. Payload = публичный URL + tunnelID |
-| `0x06` | `MsgRegisterErr` | Сервер → Клиент | Ошибка регистрации |
-| `0x07` | `MsgHTTPReq` | Сервер → Клиент | Проксируемый HTTP-запрос |
-| `0x08` | `MsgHTTPRes` | Клиент → Сервер | HTTP-ответ от локального сервера |
-| `0x09` | `MsgCloseTunnel` | Оба | Запрос на закрытие туннеля |
-| `0x0A` | `MsgError` | Оба | Сообщение об ошибке |
+| `0x01` | `MsgAuth` | Client → Server | Authentication token |
+| `0x02` | `MsgAuthOK` | Server → Client | Auth success |
+| `0x03` | `MsgAuthErr` | Server → Client | Auth error |
+| `0x04` | `MsgRegister` | Client → Server | Register tunnel (port + optional subdomain) |
+| `0x05` | `MsgRegisterOK` | Server → Client | Tunnel created (public URL + tunnelID) |
+| `0x06` | `MsgRegisterErr` | Server → Client | Registration error |
+| `0x07` | `MsgHTTPReq` | Server → Client | Proxied HTTP request |
+| `0x08` | `MsgHTTPRes` | Client → Server | HTTP response from local server |
+| `0x09` | `MsgCloseTunnel` | Both | Close tunnel request |
+| `0x0A` | `MsgError` | Both | Error message |
 
-### Сериализация HTTP-запроса (Payload для `MsgHTTPReq`)
+### HTTP request payload (`MsgHTTPReq`)
 
 ```
 [methodLen:2][method][pathLen:2][path][headerCount:4]([keyLen:2][key][valueLen:2][value])*[bodyLen:4][body]
 ```
 
-Пример для `GET /api/users?id=1`:
-
-```
-00 03 47 45 54        methodLen=3  "GET"
-00 12 2f 61 70 69      pathLen=18   "/api/users?id=1"
-  2f 75 73 65 72 73
-  3f 69 64 3d 31
-00 00 00 03            headerCount=3
-  00 04 48 6f 73 74     keyLen=4 "Host"
-  00 13 61 33 66 ...     valLen=19 "a3f8.localhost:8080"
-  00 0a 55 73 65 72 ...  keyLen=10 "User-Agent"
-  00 03 63 75 72 ...     valLen=3 "curl/8.0"
-  00 06 41 63 63 ...     keyLen=6 "Accept"
-  00 03 2a 2f 2a         valLen=3 "*/*"
-00 00 00 00            bodyLen=0 (GET без тела)
-```
-
-### Сериализация HTTP-ответа (Payload для `MsgHTTPRes`)
+### HTTP response payload (`MsgHTTPRes`)
 
 ```
 [statusCode:2][headerCount:4]([keyLen:2][key][valueLen:2][value])*[bodyLen:4][body]
 ```
 
-Пример для `200 OK {"status":"ok"}`:
-
-```
-00 C8                  statusCode=200
-00 00 00 02            headerCount=2
-  00 0c 43 6f 6e 74 ...  keyLen=12 "Content-Type"
-  00 10 61 70 70 6c ...  valLen=16 "application/json"
-  00 0e 43 6f 6e 74 ...  keyLen=14 "Content-Length"
-  00 02 31 36            valLen=2 "16"
-00 00 00 10            bodyLen=16
-  7b 22 73 74 61 74 ...  {"status":"ok"}
-```
-
 ### Keep-alive
 
-Для поддержания соединения используются **WebSocket контрольные фреймы** (Ping/Pong), а не кастомные сообщения протокола. Сервер шлёт Ping каждые 30 секунд. Клиент отвечает Pong автоматически (библиотека gorilla/websocket делает это сама). Если Pong не приходит в течение 60 секунд — соединение рвётся по таймауту.
+WebSocket control frames (Ping/Pong) are used. Server pings every 30s. Client responds automatically via gorilla/websocket. If no Pong within 60s, the connection times out.
 
 ---
 
-## Сервер — подробный разбор
-
-Сервер состоит из трёх логических частей.
+## Server — Deep Dive
 
 ### 1. Registry (`internal/server/registry.go`)
 
-**Реестр туннелей** — потокобезопасная map'а `subdomain → *Tunnel`. Это центральная точка маршрутизации: когда приходит внешний HTTP-запрос, прокси-сервер извлекает subdomain из заголовка `Host` и ищет его здесь.
+Thread-safe map `subdomain → *Tunnel`. The central routing table: when an external HTTP request arrives, the proxy extracts the subdomain from the `Host` header and looks it up here.
 
 ```go
 type Tunnel struct {
-    ID        uint64           // Уникальный числовой ID туннеля
-    Subdomain string           // Строковый идентификатор (например, "a3f8b2c1")
-    LocalPort uint16           // Порт, который клиент хочет выставить
-    Handler   *ClientHandler   // Ссылка на WebSocket-обработчик этого клиента
+    ID        uint64
+    Subdomain string
+    LocalPort uint16
+    Handler   *ClientHandler
     CreatedAt time.Time
 }
 
 type Registry struct {
-    mu      sync.RWMutex       // Мьютекс для безопасного доступа из горутин
+    mu      sync.RWMutex
     tunnels map[string]*Tunnel
     nextID  uint64
 }
 ```
 
-**Методы:**
-- `Register(subdomain, port, handler)` — атомарно добавляет туннель. Возвращает ошибку, если subdomain уже занят.
-- `Unregister(subdomain)` — удаляет туннель (вызывается при отключении клиента).
-- `Get(subdomain)` — быстрое чтение (RLock, а не полный Lock — много читателей не блокируют друг друга).
-
-Также здесь живут две утилиты:
-- `generateSubdomain()` — генерит случайный 8-символьный hex из `crypto/rand`.
-- `nextRequestID()` — атомарный счётчик для генерации уникальных ID запросов.
-
 ### 2. ClientHandler (`internal/server/handler.go`)
 
-**Обработчик одного клиентского WebSocket-соединения.** Это «мозг» серверной стороны. Каждый подключившийся клиент получает свой экземпляр `ClientHandler`.
+Handles one client WebSocket connection. Each connected client gets its own instance.
 
-**Жизненный цикл:**
+**Lifecycle:**
 
-1. **Конструктор** (`NewClientHandler`) — сохраняет соединение и реестр.
-2. **Запуск** (`Run`) — главный цикл чтения сообщений:
-   - Устанавливает read deadline = 60 секунд.
-   - Регистрирует Pong-обработчик (продлевает deadline).
-   - Запускает pingLoop в отдельной горутине (шлёт Ping каждые 30с).
-   - В бесконечном цикле читает бинарные сообщения, декодирует фреймы, диспетчеризует по типу.
-3. **handleAuth** — принимает любой токен (заглушка для v1), отвечает `MsgAuthOK`.
-4. **handleRegister** — читает порт из payload, генерит или проверяет subdomain, вызывает `registry.Register()`, отправляет `MsgRegisterOK` с публичным URL.
-5. **handleHTTPRes** — получает ответ от клиента на ранее отправленный HTTP-запрос. Ищет ожидающий запрос по `RequestID` в мапе `pending`, передаёт ответ через канал.
-6. **Очистка** (`cleanup`) — при разрыве соединения: дерегистрирует туннель, закрывает канал `done`, закрывает WebSocket.
+1. `NewClientHandler` — stores connection and registry reference.
+2. `Run()` — main read loop:
+   - Sets read deadlines, registers Pong handler.
+   - Starts `pingLoop` goroutine (sends WebSocket Ping every 30s).
+   - Reads binary messages, decodes frames, dispatches by type.
+3. `handleAuth` — accepts any token, replies `MsgAuthOK`.
+4. `handleRegister` — reads port from payload, registers tunnel, replies with public URL.
+5. `handleHTTPRes` — receives response from client, routes to awaiting `ForwardHTTP` via channel.
 
-**Мультиплексирование запросов:**
+**Request multiplexing:**
 
-Сервер может одновременно обрабатывать множество HTTP-запросов через один WebSocket. Механизм:
+Multiple HTTP requests flow over a single WebSocket connection simultaneously:
 
 ```go
 type pendingReq struct {
-    response chan protocol.HTTPResponse  // Канал для доставки ответа
-    done     chan struct{}               // Сигнал отмены
+    response chan protocol.HTTPResponse
+    done     chan struct{}
 }
-
-// В ClientHandler:
-pending map[uint64]*pendingReq  // RequestID → ожидающий запрос
+// pending map[uint64]*pendingReq  — RequestID → awaiting request
 ```
 
-Когда `ForwardHTTP` хочет отправить запрос клиенту:
-1. Генерит уникальный `requestID` (атомарный счётчик).
-2. Создаёт `pendingReq` с каналом, кладёт в мапу.
-3. Пишет `MsgHTTPReq` в WebSocket (с этим requestID).
-4. Блокируется на чтении из канала `response` (с таймаутом 30с).
-
-Когда приходит `MsgHTTPRes`:
-1. `handleHTTPRes` извлекает requestID.
-2. Находит `pendingReq` в мапе.
-3. Отправляет ответ в канал.
-4. `ForwardHTTP` просыпается и возвращает ответ.
-
-**Защита от гонок:**
-- `mu` (sync.Mutex) — защищает мапу `pending`.
-- `writeMu` (sync.Mutex) — гарантирует, что только одна горутина пишет в WebSocket. gorilla/websocket **не** потокобезопасен для записи.
+`ForwardHTTP` generates a unique `requestID`, inserts a `pendingReq` into the map, writes `MsgHTTPReq` to WebSocket, then blocks on the response channel (30s timeout). When `MsgHTTPRes` arrives, `handleHTTPRes` finds the entry and delivers the response.
 
 ### 3. ReverseProxy (`internal/server/proxy.go`)
 
-**HTTP-обработчик для внешних запросов.** Реализует интерфейс `http.Handler` (метод `ServeHTTP`).
+HTTP handler for external traffic. Implements `http.Handler`.
 
-**Алгоритм обработки внешнего запроса:**
+**Algorithm:**
+
+1. Extract subdomain from `Host` header using `extractSubdomain(host, baseDomain)`.
+2. Look up tunnel in registry → 404 if missing.
+3. Read request body (32MB limit).
+4. Serialize into `protocol.HTTPRequest`.
+5. Call `tunnel.Handler.ForwardHTTP(req)` — blocks until response.
+6. Write HTTP response back to external user.
+
+**Subdomain extraction:**
 
 ```
-1. Извлечь subdomain из заголовка Host
-   "a3f8b2c1.localhost:8080" → "a3f8b2c1"
-   
-2. Найти туннель в Registry
-   tunnel := registry.Get("a3f8b2c1")
-   Если нет → 404 "tunnel not found"
-
-3. Прочитать тело запроса (лимит 32 МБ)
-   
-4. Собрать заголовки в map[string]string
-
-5. Сериализовать HTTP-запрос в бинарный формат
-   req := protocol.HTTPRequest{Method, Path, Headers, Body}
-
-6. Отправить запрос клиенту и ждать ответ
-   resp := tunnel.Handler.ForwardHTTP(req)
-   Таймаут 30 секунд
-
-7. Записать HTTP-ответ внешнему пользователю
-   w.Header() → статус → тело
+host = "abc123.tunnel.domain.com", baseDomain = "tunnel.domain.com"
+→ suffix = ".tunnel.domain.com"
+→ prefix = "abc123"
+→ return "abc123"
 ```
-
-**Извлечение subdomain'а:**
-
-```go
-func extractSubdomain(host string) string {
-    host = host[:strings.IndexByte(host, ':')]  // Убрать порт
-    parts := strings.SplitN(host, ".", 2)        // Разбить по первой точке
-    if len(parts) < 2 { return "" }             // Нет поддомена
-    return parts[0]                             // Первая часть
-}
-```
-
-Для `abc123.localhost:8080` → `abc123`.  
-Для `abc123.tunnel.example.com` → `abc123`.
-
-### 4. Точка входа сервера (`cmd/server/main.go`)
-
-Минималистичный `main`:
-1. Парсит флаги `-addr` и `-http`.
-2. Создаёт Registry и ReverseProxy.
-3. Регистрирует HTTP-обработчик `/_tunnel` для WebSocket-апгрейда.
-4. Запускает два HTTP-сервера в разных горутинах:
-   - **:4443** — WebSocket для клиентов (контрольный канал)
-   - **:8080** — HTTP для внешних запросов (дата-канал)
 
 ---
 
-## Клиент — подробный разбор
+## Client — Deep Dive
 
 ### 1. Tunnel (`internal/client/tunnel.go`)
 
-**Основная структура клиента.** Управляет жизненным циклом туннеля.
+**Connect():**
+1. Dial WebSocket (`ws://` or `wss://` depending on `-tls` flag).
+2. Send `MsgAuth` with token.
+3. Send `MsgRegister` with local port and optional subdomain.
+4. Parse public URL and tunnelID from response.
 
-**Connect() — установка соединения:**
+**Run():**
+- Reads messages in a loop.
+- `MsgHTTPReq` → spawns `handleHTTPReq` goroutine (concurrent handling).
+- `MsgCloseTunnel` → exits loop.
 
-1. **Dial** — WebSocket-подключение к `ws://server:4443/_tunnel` (таймаут 10с).
-2. **Auth** — отправляет `MsgAuth` с токеном, ждёт `MsgAuthOK`.
-3. **Register** — отправляет `MsgRegister` с портом и опциональным subdomain'ом, ждёт `MsgRegisterOK`.
-4. Парсит ответ: извлекает публичный URL и tunnelID.
-5. Логирует: `tunnel ready: abc123.localhost:8080 -> localhost:3000`.
+**handleHTTPReq():**
+1. Deserialize HTTP request from payload.
+2. Build `http.Request` targeting `http://localhost:<port><path>`.
+3. Execute request via `http.Client` (30s timeout).
+4. Read response body (32MB limit).
+5. Serialize response, send `MsgHTTPRes` back.
 
-**Run() — главный цикл:**
+**Error handling:** Returns HTTP 502 to the server on failure.
 
-1. Устанавливает read deadline и pong-обработчик.
-2. Запускает ping-горутину (PingMessage каждые 30с).
-3. В цикле читает сообщения:
-   - `MsgHTTPReq` → запускает `handleHTTPReq` в **отдельной горутине** (чтобы обрабатывать несколько запросов параллельно).
-   - `MsgError` → логирует.
-   - `MsgCloseTunnel` → выходит из цикла.
+### 2. Client entry point (`cmd/client/main.go`)
 
-**handleHTTPReq() — проксирование запроса на localhost:**
-
-```
-1. Десериализовать HTTP-запрос из payload
-2. Создать http.Request:
-   targetURL = "http://localhost:<порт><путь>"
-   метод, заголовки, тело — из фрейма
-   Host → "localhost:<порт>"
-3. Выполнить запрос (http.Client, таймаут 30с)
-4. Прочитать тело ответа (лимит 32 МБ)
-5. Сериализовать HTTP-ответ в payload
-6. Отправить MsgHTTPRes обратно серверу (с тем же requestID)
-```
-
-**Обработка ошибок:**
-- Если локальный сервер не отвечает → отправляет `MsgHTTPRes` со статусом 502.
-- Все ошибки логируются.
-
-### 2. Точка входа клиента (`cmd/client/main.go`)
-
-1. Парсит флаги: `-server`, `-local`, `-token`, `-subdomain`.
-2. Требует `-local` (иначе `log.Fatal`).
-3. Подписывается на `SIGINT` (Ctrl+C) для graceful shutdown.
-4. **Бесконечный цикл переподключения** с экспоненциальной задержкой:
-   - Первая попытка: сразу.
-   - При неудаче: ждёт 1с, 2с, 4с, 8с, ... до 30с максимум.
-   - При успехе: сбрасывает задержку на 1с.
-   - При разрыве: переподключается.
-5. После успешного коннекта печатает баннер с публичным URL.
+Reconnection loop with exponential backoff: 1s → 2s → 4s → ... → 30s max. Resets on successful connection. Handles SIGINT for graceful shutdown.
 
 ---
 
-## Установка и запуск
+## Installation & Quick Start
 
-### Требования
+### Requirements
 
-- **Go 1.22** или новее
-- VPS с белым IP (для сервера) — или просто localhost для тестирования
+- Go 1.22+
+- VPS with public IP (for server) — or localhost for testing
 
-### Установка
+### Setup
 
 ```bash
 cd vlgr
-go mod tidy    # скачает gorilla/websocket
+go mod tidy
 ```
 
-### Запуск сервера
+### Local test (all on one machine)
 
 ```bash
-go run ./cmd/server -addr :4443 -http :8080
-```
+# Terminal 1 — server
+go run ./cmd/server
 
-Что произойдёт:
-- Сервер начнёт слушать порт **4443** для WebSocket-подключений клиентов
-- Сервер начнёт слушать порт **8080** для внешних HTTP-запросов
-- В консоли: `[server] tunnel WebSocket listening on :4443`
-- В консоли: `[server] public HTTP listening on :8080`
-
-### Запуск клиента
-
-Сначала запусти свой локальный сервер. Например, простой файловый сервер на Python:
-
-```bash
-# В отдельном терминале
+# Terminal 2 — your local web server
 python -m http.server 3000
+
+# Terminal 3 — VLGR client
+go run ./cmd/client -local 3000
+
+# Terminal 4 — test
+curl -H "Host: <hex-from-output>.localhost:8080" http://localhost:8080/
 ```
 
-Теперь запусти VLGR-клиент:
+### Building binaries
 
 ```bash
-go run ./cmd/client -server localhost:4443 -local 3000
+# Linux
+./scripts/build.sh --linux-only
+
+# Windows (PowerShell)
+.\scripts\build.ps1 -WindowsOnly
 ```
 
-Что произойдёт:
-- Клиент подключится к серверу через WebSocket
-- Пройдёт аутентификацию
-- Зарегистрирует туннель для порта 3000
-- Получит публичный URL, например `a3f8b2c1.localhost:8080`
-- В консоли появится баннер:
-
-```
-========================================
-  Tunnel: a3f8b2c1.localhost:8080
-  Local:  http://localhost:3000
-========================================
-```
-
-### Тестирование
-
-```bash
-# Из ещё одного терминала — стучимся по публичному URL
-# ВАЖНО: указываем Host-заголовок с правильным subdomain'ом
-curl -H "Host: a3f8b2c1.localhost:8080" http://localhost:8080/
-
-# Или через браузер — но придётся прописать в hosts:
-# 127.0.0.1 a3f8b2c1.localhost
-# Затем открыть http://a3f8b2c1.localhost:8080/
-```
-
-`*.localhost` всегда резолвится в `127.0.0.1` — это задокументированное поведение DNS, поэтому для локального тестирования subdomain'ы на localhost работают из коробки.
-
-### Запуск на продакшене
-
-На VPS с белым IP:
-
-```bash
-# Сервер
-go run ./cmd/server -addr :4443 -http :80
-
-# Клиент (на твоей машине)
-go run ./cmd/client -server <IP_VPS>:4443 -local 3000
-```
-
-Настрой DNS: wildcard A-запись `*.tunnel.example.com → <IP_VPS>`.
+Output in `build/linux/` and `build/windows/`.
 
 ---
 
-## Поток данных на примере запроса
+## Request Flow (Step by Step)
 
-Разберём по шагам, что происходит, когда внешний пользователь делает `GET /api/status`:
+External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 
-```
-ШАГ 1 — Внешний запрос приходит на сервер
-─────────────────────────────────────────
-curl запрашивает: GET http://a3f8b2c1.localhost:8080/api/status
-Host: a3f8b2c1.localhost:8080
-
-ШАГ 2 — Proxy извлекает subdomain
-─────────────────────────────────
-extractSubdomain("a3f8b2c1.localhost:8080") → "a3f8b2c1"
-
-ШАГ 3 — Proxy ищет туннель в Registry
-─────────────────────────────────────
-tunnel := registry.Get("a3f8b2c1")  // Найден!
-handler := tunnel.Handler            // ClientHandler этого клиента
-
-ШАГ 4 — Proxy сериализует HTTP-запрос
-─────────────────────────────────────
-req := HTTPRequest{
-    Method:  "GET",
-    Path:    "/api/status",
-    Headers: {"Host": "a3f8b2c1.localhost:8080", "User-Agent": "curl/8.0", ...},
-    Body:    nil,
-}
-payload := EncodeHTTPRequest(req)   // [00 03 GET][00 0B /api/status]...
-
-ШАГ 5 — Proxy отправляет фрейм клиенту
-──────────────────────────────────────
-frame := EncodeFrame({
-    Type:      MsgHTTPReq (0x07),
-    TunnelID:  1,
-    RequestID: 42,                    // Уникальный ID этого запроса
-    Payload:   payload,
-})
-conn.WriteMessage(BinaryMessage, frame)
-
-ШАГ 6 — Клиент получает фрейм
-─────────────────────────────
-Run() в цикле читает сообщение → frame.Type == MsgHTTPReq
-Запускается handleHTTPReq(frame) в отдельной горутине.
-
-ШАГ 7 — Клиент десериализует HTTP-запрос
-────────────────────────────────────────
-req := DecodeHTTPRequest(frame.Payload)
-// req.Method = "GET", req.Path = "/api/status", req.Headers = {...}
-
-ШАГ 8 — Клиент делает запрос на localhost
-─────────────────────────────────────────
-httpReq, _ := http.NewRequest("GET", "http://localhost:3000/api/status", nil)
-// Копирует заголовки, меняет Host → "localhost:3000"
-httpResp, _ := http.DefaultClient.Do(httpReq)
-
-ШАГ 9 — Клиент получает ответ от локального сервера
-───────────────────────────────────────────────────
-// httpResp.StatusCode = 200
-// httpResp.Body = {"status": "ok", "uptime": 12345}
-
-ШАГ 10 — Клиент сериализует HTTP-ответ
-──────────────────────────────────────
-resp := HTTPResponse{
-    StatusCode: 200,
-    Headers:    {"Content-Type": "application/json", ...},
-    Body:       []byte(`{"status":"ok","uptime":12345}`),
-}
-payload := EncodeHTTPResponse(resp)
-
-ШАГ 11 — Клиент отправляет ответ серверу
-────────────────────────────────────────
-respFrame := EncodeFrame({
-    Type:      MsgHTTPRes (0x08),
-    TunnelID:  1,
-    RequestID: 42,                    // Тот же RequestID!
-    Payload:   payload,
-})
-conn.WriteMessage(BinaryMessage, respFrame)
-
-ШАГ 12 — Сервер получает ответ
-──────────────────────────────
-handleHTTPRes(frame):
-  requestID = 42
-  pr := pending[42]                  // Находит ожидающий запрос
-  pr.response <- decodedResponse     // Отправляет в канал
-
-ШАГ 13 — Proxy получает ответ
-─────────────────────────────
-ForwardHTTP() просыпается:
-  resp := <-pr.response
-  return resp                        // Возвращает HTTPResponse
-
-ШАГ 14 — Proxy пишет ответ внешнему пользователю
-─────────────────────────────────────────────────
-w.WriteHeader(200)
-w.Header().Set("Content-Type", "application/json")
-w.Write([]byte(`{"status":"ok","uptime":12345}`))
-
-ШАГ 15 — curl получает ответ
-────────────────────────────
-$ curl -H "Host: a3f8b2c1.localhost:8080" http://localhost:8080/api/status
-{"status":"ok","uptime":12345}
-```
-
-Весь этот путь (15 шагов) для пользователя выглядит как обычный HTTP-запрос. Задержка складывается из:
-- Сетевой задержки между внешним пользователем и сервером
-- Сетевой задержки между сервером и клиентом
-- Времени обработки локальным сервером
+1. **External request hits server** — HTTPS → Caddy (on VPS) → localhost:8080
+2. **Proxy extracts subdomain** — `extractSubdomain("abc123.tunnel.domain.com:443", "tunnel.domain.com")` → `"abc123"`
+3. **Proxy looks up tunnel** — `registry.Get("abc123")` → found!
+4. **Proxy serializes HTTP request** — `EncodeHTTPRequest(...)` → binary payload
+5. **Proxy sends frame to client** — `MsgHTTPReq` with `RequestID: 42` over WebSocket
+6. **Client receives frame** — `Run()` reads message, spawns handler goroutine
+7. **Client deserializes HTTP request** — `DecodeHTTPRequest(payload)`
+8. **Client calls localhost** — `GET http://localhost:3000/api/status`
+9. **Client gets response** — `{"status": "ok", "uptime": 12345}`
+10. **Client serializes response** — `EncodeHTTPResponse(...)`
+11. **Client sends response** — `MsgHTTPRes` with same `RequestID: 42`
+12. **Server receives response** — `handleHTTPRes` routes to pending request channel
+13. **Proxy wakes up** — `ForwardHTTP` returns `HTTPResponse`
+14. **Proxy writes to external user** — HTTP 200 + JSON body
+15. **External user gets response** — `{"status": "ok", "uptime": 12345}`
 
 ---
 
-## Флаги командной строки
+## CLI Flags
 
-### Сервер (`cmd/server`)
+### Server (`cmd/server`)
 
-| Флаг | По умолчанию | Описание |
+| Flag | Default | Description |
 |---|---|---|
-| `-addr` | `:4443` | Адрес для WebSocket-подключений клиентов |
-| `-http` | `:8080` | Адрес для входящих HTTP-запросов из интернета |
+| `-addr` | `:4443` | WebSocket listen address for tunnel clients |
+| `-http` | `:8080` | HTTP listen address for public traffic |
+| `-domain` | `localhost:8080` | Base domain for tunnel URLs (e.g. `tunnel.example.com`) |
 
-### Клиент (`cmd/client`)
+### Client (`cmd/client`)
 
-| Флаг | По умолчанию | Описание |
+| Flag | Default | Description |
 |---|---|---|
-| `-server` | `localhost:4443` | Адрес VLGR-сервера |
-| `-local` | **обязателен** | Порт локального сервера, который нужно выставить |
-| `-token` | `vlgr-token` | Токен аутентификации |
-| `-subdomain` | авто | Запросить конкретный subdomain (если свободен) |
+| `-server` | `localhost:4443` | VLGR server address |
+| `-local` | **required** | Local port to expose |
+| `-token` | `vlgr-token` | Authentication token |
+| `-subdomain` | auto | Request specific subdomain |
+| `-tls` | `false` | Use WSS (TLS) — required when connecting via Caddy/HTTPS |
 
 ---
 
-## Что можно улучшить (дорожная карта)
+## Production Deployment
 
-- **TLS** — обернуть WebSocket в WSS и HTTP в HTTPS (Let's Encrypt)
-- **TCP-туннели** — не только HTTP, но и произвольные TCP-соединения
-- **Веб-интерфейс** — дашборд для просмотра активных туннелей и истории запросов
-- **Replay запросов** — как в оригинальном ngrok
-- **Лимиты** — rate limiting на туннель, ограничение числа соединений
-- **Настоящая аутентификация** — API-ключи, OAuth
-- **Метрики** — Prometheus, Grafana
-- **gRPC-стриминг** — вместо кастомного протокола
+See [GETTING_STARTED.md](GETTING_STARTED.md) for the full production guide covering:
+
+- Cloudflare DNS configuration
+- Caddy setup with wildcard TLS (Let's Encrypt DNS-01)
+- Cloudflare API token creation
+- Caddy rebuild with Cloudflare DNS plugin
+- VLGR server systemd unit
+- Client connection via WSS
+
+### Quick production commands
+
+```bash
+# Server (VPS)
+./vlgr-server -addr 127.0.0.1:4443 -http 127.0.0.1:8080 -domain tunnel.domain.com
+
+# Client (your machine)
+./vlgr-client -server tunnel.domain.com:443 -local 3000 -tls
+```

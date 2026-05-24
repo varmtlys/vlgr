@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -15,6 +16,8 @@ import (
 )
 
 const maxBodySize = 32 << 20
+
+var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 type Tunnel struct {
 	serverAddr string
@@ -27,7 +30,8 @@ type Tunnel struct {
 	publicURL string
 	tunnelID  uint64
 
-	done chan struct{}
+	writeMu sync.Mutex
+	done    chan struct{}
 }
 
 func NewTunnel(serverAddr, token string, localPort uint16, subdomain string, useTLS bool) *Tunnel {
@@ -136,19 +140,7 @@ func (t *Tunnel) Run() {
 		return nil
 	})
 
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-				conn.WriteMessage(websocket.PingMessage, nil)
-			case <-t.done:
-				return
-			}
-		}
-	}()
+	go t.pingLoop()
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -176,6 +168,22 @@ func (t *Tunnel) Run() {
 	}
 }
 
+func (t *Tunnel) pingLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			t.writeMu.Lock()
+			t.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			t.conn.WriteMessage(websocket.PingMessage, nil)
+			t.writeMu.Unlock()
+		case <-t.done:
+			return
+		}
+	}
+}
+
 func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 	req, err := protocol.DecodeHTTPRequest(frame.Payload)
 	if err != nil {
@@ -197,8 +205,7 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 	}
 	httpReq.Header.Set("Host", fmt.Sprintf("localhost:%d", t.localPort))
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	httpResp, err := client.Do(httpReq)
+	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		log.Printf("[client] local HTTP error: %v", err)
 		t.sendHTTPError(frame.RequestID, 502, err.Error())
@@ -220,41 +227,37 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 		}
 	}
 
-	respPayload := protocol.EncodeHTTPResponse(protocol.HTTPResponse{
+	t.writeResponse(frame.RequestID, protocol.HTTPResponse{
 		StatusCode: uint16(httpResp.StatusCode),
 		Headers:    headers,
 		Body:       body,
 	})
+}
 
-	respFrame := protocol.EncodeFrame(protocol.Frame{
+func (t *Tunnel) writeResponse(requestID uint64, resp protocol.HTTPResponse) {
+	respPayload := protocol.EncodeHTTPResponse(resp)
+
+	frame := protocol.EncodeFrame(protocol.Frame{
 		Type:      protocol.MsgHTTPRes,
 		TunnelID:  t.tunnelID,
-		RequestID: frame.RequestID,
+		RequestID: requestID,
 		Payload:   respPayload,
 	})
 
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
 	t.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if err := t.conn.WriteMessage(websocket.BinaryMessage, respFrame); err != nil {
+	if err := t.conn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
 		log.Printf("[client] write HTTP response error: %v", err)
 	}
 }
 
 func (t *Tunnel) sendHTTPError(requestID uint64, statusCode uint16, msg string) {
-	errPayload := protocol.EncodeHTTPResponse(protocol.HTTPResponse{
+	t.writeResponse(requestID, protocol.HTTPResponse{
 		StatusCode: statusCode,
 		Headers:    map[string]string{"Content-Type": "text/plain"},
 		Body:       []byte(msg),
 	})
-
-	errFrame := protocol.EncodeFrame(protocol.Frame{
-		Type:      protocol.MsgHTTPRes,
-		TunnelID:  t.tunnelID,
-		RequestID: requestID,
-		Payload:   errPayload,
-	})
-
-	t.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	t.conn.WriteMessage(websocket.BinaryMessage, errFrame)
 }
 
 func (t *Tunnel) Close() {
@@ -263,9 +266,11 @@ func (t *Tunnel) Close() {
 		closeFrame := protocol.EncodeFrame(protocol.Frame{
 			Type: protocol.MsgCloseTunnel,
 		})
+		t.writeMu.Lock()
 		t.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		t.conn.WriteMessage(websocket.BinaryMessage, closeFrame)
 		t.conn.Close()
+		t.writeMu.Unlock()
 	}
 }
 

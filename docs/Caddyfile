@@ -1,16 +1,18 @@
-# VLGR Tunnel
-# Поместить в /etc/caddy/Caddyfile или импортировать в основной конфиг
+# VLGR Tunnel — Caddy configuration
+# Place in /etc/caddy/Caddyfile or import into your main config.
+#
+# Requires:
+#   1. caddy-dns/cloudflare plugin installed (see GETTING_STARTED.md)
+#   2. CF_API_TOKEN environment variable set (Cloudflare API token with DNS:Edit)
+#   3. DNS records: tunnel.domain.com and *.tunnel.domain.com → VPS IP (gray cloud)
 
-# WebSocket endpoint для VLGR-клиентов (подключение из клиента к серверу)
+# WebSocket endpoint — clients connect here
 tunnel.domain.com {
     reverse_proxy 127.0.0.1:4443
 }
 
-# Публичные HTTP-запросы через поддомены туннелей
-# Клиент получает URL вида a3f8b2c1.tunnel.domain.com
-# Внешний пользователь стучится по этому URL → Caddy → VLGR → клиентский localhost
+# Public HTTP traffic — external users hit <subdomain>.tunnel.domain.com
 *.tunnel.domain.com {
-    # DNS-01 challenge через Cloudflare для wildcard-сертификата
     tls {
         dns cloudflare {env.CF_API_TOKEN}
     }
