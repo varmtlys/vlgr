@@ -24,19 +24,19 @@ You run a web server on `localhost:3000`. No public IP, behind NAT. VLGR exposes
 
 ```
 ┌──────────────────┐         WebSocket          ┌─────────────────────┐
-│   VLGR Client    │◄══════════════════════════►│    VLGR Server       │
-│   (your laptop)  │     control channel         │    (VPS, public IP)  │
-│                  │                             │                     │
-│  localhost:3000  │                             │  :4443  WebSocket   │
-│                  │                             │  :8080  HTTP        │
-└──────────────────┘                             └──────────┬──────────┘
-                                                            │
-                                                     HTTPS request
-                                                            │
-                                                  ┌─────────┴─────────┐
-                                                  │  External user     │
-                                                  │  (browser, curl)   │
-                                                  └───────────────────┘
+│   VLGR Client    │◄══════════════════════════►│   VLGR Server       │
+│   (your laptop)  │     control channel        │   (VPS, public IP)  │
+│                  │                            │                     │
+│  localhost:3000  │                            │  :4443  WebSocket   │
+│                  │                            │  :8080  HTTP        │
+└──────────────────┘                            └──────────┬──────────┘
+                                                           │
+                                                    HTTPS request
+                                                           │
+                                                 ┌─────────┴─────────┐
+                                                 │  External user    │
+                                                 │  (browser, curl)  │
+                                                 └───────────────────┘
 ```
 
 The client opens a persistent WebSocket to the server. The server assigns a unique public URL (e.g., `a3f8b2c1.tunnel.domain.com`). When an external user hits that URL, the server serializes the HTTP request into a binary frame, sends it to the client over WebSocket. The client forwards it to `localhost:3000`, serializes the response, and sends it back. The server returns the response to the external user — who sees a normal HTTP exchange.
