@@ -13,9 +13,10 @@
 # Options:
 #   -d <domain>     Base domain (required, e.g. tunnel.example.com)
 #   -t <token>      Auth token for clients (default: auto-generated)
-#   -u <user>       System user to run the service (default: nobody)
+#   -U <user>       System user to run the service (default: nobody)
 #   -g <group>      System group (default: nogroup on Debian, nobody on RHEL)
 #   -p <path>       Install path (default: /opt/vlgr)
+#   -u              Uninstall VLGR server (removes service, binary, config)
 #   --caddy         Install/configure Caddy with Cloudflare DNS plugin
 #   --cf-token <t>  Cloudflare API token (requires --caddy)
 #   --no-service    Skip systemd service creation
@@ -37,6 +38,7 @@ INSTALL_CADDY=false
 CF_TOKEN=""
 NO_SERVICE=false
 NO_BUILD=false
+UNINSTALL=false
 REPO_URL="https://github.com/your/vlgr.git"
 
 # ─── Parse args ──────────────────────────────────────────────────────────────
@@ -44,7 +46,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -d) DOMAIN="$2"; shift 2 ;;
     -t) TOKEN="$2"; shift 2 ;;
-    -u) SERVICE_USER="$2"; shift 2 ;;
+    -u|--uninstall) UNINSTALL=true; shift ;;
+    -U) SERVICE_USER="$2"; shift 2 ;;
     -g) SERVICE_GROUP="$2"; shift 2 ;;
     -p) INSTALL_PATH="$2"; shift 2 ;;
     --caddy) INSTALL_CADDY=true; shift ;;
@@ -470,8 +473,43 @@ OVERRIDE
   fi
 }
 
+# ─── Uninstall ─────────────────────────────────────────────────────────────────
+uninstall() {
+  echo ""
+  echo -e "\033[1;33m========================================\033[0m"
+  echo -e "\033[1;33m  VLGR Server Uninstall\033[0m"
+  echo -e "\033[1;33m========================================\033[0m"
+  echo ""
+
+  log "Stopping and disabling service..."
+  systemctl stop vlgr-server 2>/dev/null || true
+  systemctl disable vlgr-server 2>/dev/null || true
+
+  log "Removing systemd unit..."
+  rm -f /etc/systemd/system/vlgr-server.service
+  systemctl daemon-reload 2>/dev/null || true
+
+  log "Removing binary and install path..."
+  rm -rf "$INSTALL_PATH"
+
+  log "Removing config..."
+  rm -rf /etc/vlgr
+
+  log "Removing cached source..."
+  rm -rf "${INSTALL_PATH}/src"
+
+  echo ""
+  echo -e "\033[1;32m  VLGR Server uninstalled successfully!\033[0m"
+  echo ""
+}
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 main() {
+  if $UNINSTALL; then
+    uninstall
+    exit 0
+  fi
+
   echo ""
   echo -e "\033[1;36m========================================\033[0m"
   echo -e "\033[1;36m  VLGR Server Deploy\033[0m"
