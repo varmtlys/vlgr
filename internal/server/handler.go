@@ -20,8 +20,9 @@ const (
 )
 
 type pendingReq struct {
-	response chan protocol.HTTPResponse
-	done     chan struct{}
+	response   chan protocol.HTTPResponse
+	streamData chan []byte
+	done       chan struct{}
 }
 
 type ClientHandler struct {
@@ -83,19 +84,27 @@ func (h *ClientHandler) Run() {
 			continue
 		}
 
-		switch frame.Type {
-		case protocol.MsgAuth:
-			h.handleAuth(frame)
-		case protocol.MsgRegister:
-			h.handleRegister(frame)
-		case protocol.MsgHTTPRes:
-			h.handleHTTPRes(frame)
-		case protocol.MsgCloseTunnel:
-			log.Printf("[handler] client requested close")
-			return
-		default:
-			log.Printf("[handler] unknown message type: 0x%02x", frame.Type)
-		}
+		h.handleFrame(frame)
+	}
+}
+
+func (h *ClientHandler) handleFrame(frame protocol.Frame) {
+	switch frame.Type {
+	case protocol.MsgAuth:
+		h.handleAuth(frame)
+	case protocol.MsgRegister:
+		h.handleRegister(frame)
+	case protocol.MsgHTTPRes:
+		h.handleHTTPRes(frame)
+	case protocol.MsgStreamData:
+		h.handleStreamData(frame)
+	case protocol.MsgStreamClose:
+		h.handleStreamClose(frame)
+	case protocol.MsgCloseTunnel:
+		log.Printf("[handler] client requested close")
+		h.cleanup()
+	default:
+		log.Printf("[handler] unknown message type: 0x%02x", frame.Type)
 	}
 }
 
@@ -174,7 +183,7 @@ func (h *ClientHandler) handleHTTPRes(frame protocol.Frame) {
 
 	h.mu.Lock()
 	pr, ok := h.pending[frame.RequestID]
-	if ok {
+	if ok && pr.streamData == nil {
 		delete(h.pending, frame.RequestID)
 	}
 	h.mu.Unlock()
@@ -192,8 +201,35 @@ func (h *ClientHandler) handleHTTPRes(frame protocol.Frame) {
 	}
 }
 
-func (h *ClientHandler) ForwardHTTP(req protocol.HTTPRequest) (protocol.HTTPResponse, error) {
-	requestID := nextRequestID()
+func (h *ClientHandler) handleStreamData(frame protocol.Frame) {
+	h.mu.Lock()
+	pr, ok := h.pending[frame.RequestID]
+	h.mu.Unlock()
+
+	if !ok || pr.streamData == nil {
+		return
+	}
+
+	select {
+	case pr.streamData <- frame.Payload:
+	case <-pr.done:
+	}
+}
+
+func (h *ClientHandler) handleStreamClose(frame protocol.Frame) {
+	h.mu.Lock()
+	pr, ok := h.pending[frame.RequestID]
+	h.mu.Unlock()
+
+	if !ok || pr.streamData == nil {
+		return
+	}
+
+	close(pr.streamData)
+}
+
+func (h *ClientHandler) ForwardHTTP(req protocol.HTTPRequest, streamData chan []byte) (requestID uint64, resp protocol.HTTPResponse, cleanup func(), err error) {
+	requestID = nextRequestID()
 
 	if h.debug {
 		log.Printf("[debug] forward request #%d: %s %s (%d headers, %d body bytes)",
@@ -201,20 +237,14 @@ func (h *ClientHandler) ForwardHTTP(req protocol.HTTPRequest) (protocol.HTTPResp
 	}
 
 	pr := &pendingReq{
-		response: make(chan protocol.HTTPResponse, 1),
-		done:     make(chan struct{}),
+		response:   make(chan protocol.HTTPResponse, 1),
+		streamData: streamData,
+		done:       make(chan struct{}),
 	}
 
 	h.mu.Lock()
 	h.pending[requestID] = pr
 	h.mu.Unlock()
-
-	defer func() {
-		h.mu.Lock()
-		delete(h.pending, requestID)
-		h.mu.Unlock()
-		close(pr.done)
-	}()
 
 	payload := protocol.EncodeHTTPRequest(req)
 	tunnelID := uint64(0)
@@ -227,19 +257,52 @@ func (h *ClientHandler) ForwardHTTP(req protocol.HTTPRequest) (protocol.HTTPResp
 	}
 
 	if err := h.writeMessage(protocol.MsgHTTPReq, tunnelID, requestID, payload); err != nil {
-		return protocol.HTTPResponse{}, fmt.Errorf("forward: write error: %w", err)
+		h.mu.Lock()
+		delete(h.pending, requestID)
+		h.mu.Unlock()
+		close(pr.done)
+		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: write error: %w", err)
 	}
 
 	select {
-	case resp := <-pr.response:
-		if h.debug {
-			log.Printf("[debug] forward response #%d: status %d (%d headers, %d body bytes)",
-				requestID, resp.StatusCode, len(resp.Headers), len(resp.Body))
-		}
-		return resp, nil
+	case resp = <-pr.response:
 	case <-time.After(requestTimeout):
-		return protocol.HTTPResponse{}, fmt.Errorf("forward: timeout after %v", requestTimeout)
+		h.mu.Lock()
+		delete(h.pending, requestID)
+		h.mu.Unlock()
+		close(pr.done)
+		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: timeout after %v", requestTimeout)
 	}
+
+	if h.debug {
+		log.Printf("[debug] forward response #%d: status %d (%d headers, %d body bytes)",
+			requestID, resp.StatusCode, len(resp.Headers), len(resp.Body))
+	}
+
+	if streamData == nil {
+		h.mu.Lock()
+		delete(h.pending, requestID)
+		h.mu.Unlock()
+		close(pr.done)
+		cleanup = func() {}
+	} else {
+		cleanup = func() {
+			h.mu.Lock()
+			delete(h.pending, requestID)
+			h.mu.Unlock()
+			close(pr.done)
+		}
+	}
+
+	return requestID, resp, cleanup, nil
+}
+
+func (h *ClientHandler) SendStreamData(requestID uint64, data []byte) error {
+	return h.writeMessage(protocol.MsgStreamData, 0, requestID, data)
+}
+
+func (h *ClientHandler) SendStreamClose(requestID uint64) error {
+	return h.writeMessage(protocol.MsgStreamClose, 0, requestID, nil)
 }
 
 func (h *ClientHandler) writeMessage(msgType byte, tunnelID, requestID uint64, payload []byte) error {

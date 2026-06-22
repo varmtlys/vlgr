@@ -6,11 +6,15 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 
 	"vlgr/internal/protocol"
 )
 
-const maxBodySize = 32 << 20
+const (
+	maxBodySize    = 32 << 20
+	streamBufSize  = 32 * 1024
+)
 
 type ReverseProxy struct {
 	registry   *Registry
@@ -20,6 +24,24 @@ type ReverseProxy struct {
 
 func NewReverseProxy(registry *Registry, baseDomain string, debug bool) *ReverseProxy {
 	return &ReverseProxy{registry: registry, baseDomain: baseDomain, debug: debug}
+}
+
+func isWebSocketUpgrade(r *http.Request) bool {
+	for _, v := range r.Header["Upgrade"] {
+		for _, part := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), "websocket") {
+				return true
+			}
+		}
+	}
+	for _, v := range r.Header["Connection"] {
+		for _, part := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -75,37 +97,93 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Body:    body,
 	}
 
-	resp, err := tunnel.Handler.ForwardHTTP(req)
+	var streamData chan []byte
+	if isWebSocketUpgrade(r) {
+		streamData = make(chan []byte, 256)
+		if p.debug {
+			log.Printf("[debug] WebSocket upgrade detected for %s", r.URL.RequestURI())
+		}
+	}
+
+	requestID, resp, cleanup, err := tunnel.Handler.ForwardHTTP(req, streamData)
 	if err != nil {
 		log.Printf("[proxy] forward error for %s: %v", subdomain, err)
 		http.Error(w, "tunnel error", http.StatusBadGateway)
 		return
 	}
+	defer cleanup()
 
-	if p.debug {
-		log.Printf("[debug] response status: %d", resp.StatusCode)
-		log.Printf("[debug] response headers:")
-		for k, values := range resp.Headers {
-			for _, v := range values {
-				log.Printf("[debug]   %s: %s", k, v)
+	if streamData == nil {
+		for key, values := range resp.Headers {
+			for _, value := range values {
+				w.Header().Add(key, value)
 			}
 		}
-		if len(resp.Body) > 0 {
-			bodyPreview := string(resp.Body)
-			if len(bodyPreview) > 200 {
-				bodyPreview = bodyPreview[:200] + "..."
-			}
-			log.Printf("[debug] response body: %s", bodyPreview)
-		}
+		w.WriteHeader(int(resp.StatusCode))
+		w.Write(resp.Body)
+		return
 	}
 
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		log.Printf("[proxy] hijacking not supported for %s", subdomain)
+		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
+		return
+	}
+
+	conn, bufrw, err := hj.Hijack()
+	if err != nil {
+		log.Printf("[proxy] hijack error for %s: %v", subdomain, err)
+		http.Error(w, "hijack error", http.StatusInternalServerError)
+		return
+	}
+
+	bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
 	for key, values := range resp.Headers {
 		for _, value := range values {
-			w.Header().Add(key, value)
+			bufrw.WriteString(fmt.Sprintf("%s: %s\r\n", key, value))
 		}
 	}
-	w.WriteHeader(int(resp.StatusCode))
-	w.Write(resp.Body)
+	bufrw.WriteString("\r\n")
+	bufrw.Flush()
+
+	if p.debug {
+		log.Printf("[debug] WebSocket relay started for %s (request #%d)", r.URL.RequestURI(), resp.StatusCode)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, streamBufSize)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil {
+				tunnel.Handler.SendStreamClose(requestID)
+				return
+			}
+			if err := tunnel.Handler.SendStreamData(requestID, buf[:n]); err != nil {
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for data := range streamData {
+			if _, err := conn.Write(data); err != nil {
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+	conn.Close()
+
+	if p.debug {
+		log.Printf("[debug] WebSocket relay ended for %s", r.URL.RequestURI())
+	}
 }
 
 func extractSubdomain(host, baseDomain string) string {

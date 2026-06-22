@@ -18,6 +18,8 @@ const (
 	MsgHTTPRes     byte = 0x08
 	MsgCloseTunnel byte = 0x09
 	MsgError       byte = 0x0A
+	MsgStreamData  byte = 0x0B
+	MsgStreamClose byte = 0x0C
 )
 
 const HeaderSize = 21
