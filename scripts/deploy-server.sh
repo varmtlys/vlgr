@@ -4,7 +4,7 @@
 # Supported distros: Debian/Ubuntu, RHEL/CentOS/Fedora, Arch, Alpine, openSUSE, Void
 #
 # Usage:
-#   curl -sL https://github.com/your/vlgr/raw/main/scripts/deploy-server.sh | sudo bash -s -- \
+#   curl -sL https://github.com/varmtlys/vlgr/raw/main/scripts/deploy-server.sh | sudo bash -s -- \
 #     -d tunnel.example.com -t mytoken
 #
 #   # Or locally:
@@ -39,7 +39,7 @@ CF_TOKEN=""
 NO_SERVICE=false
 NO_BUILD=false
 UNINSTALL=false
-REPO_URL="https://github.com/your/vlgr.git"
+REPO_URL="https://github.com/varmtlys/vlgr.git"
 
 # ─── Parse args ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -328,7 +328,7 @@ write_service() {
   cat > "$svc" <<SERVICE
 [Unit]
 Description=VLGR Tunnel Server
-Documentation=https://github.com/your/vlgr
+Documentation=https://github.com/varmtlys/vlgr
 After=network.target
 Wants=network.target
 
