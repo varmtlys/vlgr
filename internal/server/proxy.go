@@ -41,13 +41,15 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body.Close()
 
-	headers := make(map[string]string)
+	log.Printf("[proxy] received %s %s (body: %d bytes)", r.Method, r.URL.RequestURI(), len(body))
+
+	headers := make(map[string][]string)
 	for key, values := range r.Header {
 		if len(values) > 0 {
-			headers[key] = values[0]
+			headers[key] = values
 		}
 	}
-	headers["Host"] = r.Host
+	headers["Host"] = []string{r.Host}
 
 	req := protocol.HTTPRequest{
 		Method:  r.Method,
@@ -63,8 +65,10 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for key, value := range resp.Headers {
-		w.Header().Set(key, value)
+	for key, values := range resp.Headers {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
 	}
 	w.WriteHeader(int(resp.StatusCode))
 	w.Write(resp.Body)
