@@ -167,9 +167,13 @@ func (t *Tunnel) Run() {
 		}
 
 		switch frame.Type {
-		case protocol.MsgHTTPReq:
-			go t.handleHTTPReq(frame)
-		case protocol.MsgError:
+	case protocol.MsgHTTPReq:
+		if t.debug {
+			log.Printf("[debug] received HTTP request frame: tunnel=%d request=%d payload=%d bytes",
+				frame.TunnelID, frame.RequestID, len(frame.Payload))
+		}
+		go t.handleHTTPReq(frame)
+	case protocol.MsgError:
 			log.Printf("[client] server error: %s", string(frame.Payload))
 		case protocol.MsgCloseTunnel:
 			log.Printf("[client] server closed tunnel")
@@ -197,7 +201,19 @@ func (t *Tunnel) pingLoop() {
 func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 	req, err := protocol.DecodeHTTPRequest(frame.Payload)
 	if err != nil {
-		log.Printf("[client] decode HTTP request error: %v", err)
+		log.Printf("[client] decode HTTP request error: %v (payload %d bytes)", err, len(frame.Payload))
+		if t.debug && len(frame.Payload) > 0 {
+			preview := len(frame.Payload)
+			if preview > 256 {
+				preview = 256
+			}
+			log.Printf("[debug] request payload hex: %x", frame.Payload[:preview])
+			textPreview := string(frame.Payload)
+			if len(textPreview) > 200 {
+				textPreview = textPreview[:200]
+			}
+			log.Printf("[debug] request payload text: %q", textPreview)
+		}
 		t.sendHTTPError(frame.RequestID, 502, err.Error())
 		return
 	}
@@ -221,6 +237,10 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 	}
 
 	targetURL := fmt.Sprintf("http://localhost:%d%s", t.localPort, req.Path)
+	if t.debug {
+		log.Printf("[debug] forwarding to %s", targetURL)
+	}
+
 	httpReq, err := http.NewRequest(req.Method, targetURL, bytes.NewReader(req.Body))
 	if err != nil {
 		log.Printf("[client] create local request error: %v", err)
@@ -246,8 +266,15 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 	}
 	defer httpResp.Body.Close()
 
+	body, err := io.ReadAll(io.LimitReader(httpResp.Body, maxBodySize))
+	if err != nil {
+		log.Printf("[client] read response body error: %v", err)
+		t.sendHTTPError(frame.RequestID, 502, err.Error())
+		return
+	}
+
 	statusCode := uint16(httpResp.StatusCode)
-	log.Printf("[client] local response: %d %s", statusCode, http.StatusText(int(statusCode)))
+	log.Printf("[client] local response: %d %s (%d body bytes)", statusCode, http.StatusText(int(statusCode)), len(body))
 
 	if t.debug {
 		log.Printf("[debug] response headers:")
@@ -256,13 +283,13 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 				log.Printf("[debug]   %s: %s", k, v)
 			}
 		}
-	}
-
-	body, err := io.ReadAll(io.LimitReader(httpResp.Body, maxBodySize))
-	if err != nil {
-		log.Printf("[client] read response body error: %v", err)
-		t.sendHTTPError(frame.RequestID, 502, err.Error())
-		return
+		if len(body) > 0 {
+			bodyPreview := string(body)
+			if len(bodyPreview) > 200 {
+				bodyPreview = bodyPreview[:200] + "..."
+			}
+			log.Printf("[debug] response body: %s", bodyPreview)
+		}
 	}
 
 	headers := make(map[string][]string)

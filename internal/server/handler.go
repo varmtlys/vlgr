@@ -29,6 +29,7 @@ type ClientHandler struct {
 	registry   *Registry
 	tunnel     *Tunnel
 	baseDomain string
+	debug      bool
 
 	pending map[uint64]*pendingReq
 	mu      sync.Mutex
@@ -37,11 +38,12 @@ type ClientHandler struct {
 	done chan struct{}
 }
 
-func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain string) *ClientHandler {
+func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain string, debug bool) *ClientHandler {
 	return &ClientHandler{
 		conn:       conn,
 		registry:   registry,
 		baseDomain: baseDomain,
+		debug:      debug,
 		pending:    make(map[uint64]*pendingReq),
 		done:       make(chan struct{}),
 	}
@@ -70,7 +72,14 @@ func (h *ClientHandler) Run() {
 
 		frame, err := protocol.DecodeFrame(msg)
 		if err != nil {
-			log.Printf("[handler] decode error: %v", err)
+			log.Printf("[handler] decode error: %v (%d bytes)", err, len(msg))
+			if h.debug && len(msg) > 0 {
+				preview := len(msg)
+				if preview > 128 {
+					preview = 128
+				}
+				log.Printf("[debug] raw frame hex: %x", msg[:preview])
+			}
 			continue
 		}
 
@@ -152,7 +161,14 @@ func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 func (h *ClientHandler) handleHTTPRes(frame protocol.Frame) {
 	resp, err := protocol.DecodeHTTPResponse(frame.Payload)
 	if err != nil {
-		log.Printf("[handler] decode HTTP response error: %v", err)
+		log.Printf("[handler] decode HTTP response error: %v (payload %d bytes)", err, len(frame.Payload))
+		if h.debug && len(frame.Payload) > 0 {
+			preview := len(frame.Payload)
+			if preview > 256 {
+				preview = 256
+			}
+			log.Printf("[debug] response payload hex: %x", frame.Payload[:preview])
+		}
 		return
 	}
 
@@ -179,6 +195,11 @@ func (h *ClientHandler) handleHTTPRes(frame protocol.Frame) {
 func (h *ClientHandler) ForwardHTTP(req protocol.HTTPRequest) (protocol.HTTPResponse, error) {
 	requestID := nextRequestID()
 
+	if h.debug {
+		log.Printf("[debug] forward request #%d: %s %s (%d headers, %d body bytes)",
+			requestID, req.Method, req.Path, len(req.Headers), len(req.Body))
+	}
+
 	pr := &pendingReq{
 		response: make(chan protocol.HTTPResponse, 1),
 		done:     make(chan struct{}),
@@ -201,12 +222,20 @@ func (h *ClientHandler) ForwardHTTP(req protocol.HTTPRequest) (protocol.HTTPResp
 		tunnelID = h.tunnel.ID
 	}
 
+	if h.debug {
+		log.Printf("[debug] forward payload #%d: %d bytes", requestID, len(payload))
+	}
+
 	if err := h.writeMessage(protocol.MsgHTTPReq, tunnelID, requestID, payload); err != nil {
 		return protocol.HTTPResponse{}, fmt.Errorf("forward: write error: %w", err)
 	}
 
 	select {
 	case resp := <-pr.response:
+		if h.debug {
+			log.Printf("[debug] forward response #%d: status %d (%d headers, %d body bytes)",
+				requestID, resp.StatusCode, len(resp.Headers), len(resp.Body))
+		}
 		return resp, nil
 	case <-time.After(requestTimeout):
 		return protocol.HTTPResponse{}, fmt.Errorf("forward: timeout after %v", requestTimeout)

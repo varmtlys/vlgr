@@ -14,6 +14,7 @@ var (
 	wsAddr   = flag.String("addr", ":4443", "WebSocket listen address for tunnel clients")
 	httpAddr = flag.String("http", ":8080", "HTTP listen address for public traffic")
 	domain   = flag.String("domain", "localhost:8080", "Base domain for tunnel URLs (e.g. tunnel.example.com)")
+	debug    = flag.Bool("debug", false, "Enable verbose debug logging")
 )
 
 var upgrader = websocket.Upgrader{
@@ -27,7 +28,7 @@ func main() {
 
 	baseDomain := *domain
 	registry := server.NewRegistry()
-	proxy := server.NewReverseProxy(registry, baseDomain)
+	proxy := server.NewReverseProxy(registry, baseDomain, *debug)
 
 	http.HandleFunc("/_tunnel", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -36,7 +37,7 @@ func main() {
 			return
 		}
 
-		handler := server.NewClientHandler(conn, registry, baseDomain)
+		handler := server.NewClientHandler(conn, registry, baseDomain, *debug)
 		log.Printf("[server] new client connected")
 		handler.Run()
 	})
