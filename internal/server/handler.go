@@ -225,10 +225,13 @@ func (h *ClientHandler) handleStreamData(frame protocol.Frame) {
 		return
 	}
 
-	select {
-	case pr.streamData <- frame.Payload:
-	case <-pr.done:
-	}
+	func() {
+		defer func() { recover() }()
+		select {
+		case pr.streamData <- frame.Payload:
+		case <-pr.done:
+		}
+	}()
 }
 
 func (h *ClientHandler) handleStreamClose(frame protocol.Frame) {

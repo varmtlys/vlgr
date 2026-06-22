@@ -487,7 +487,7 @@ func (t *Tunnel) handleWebSocketReq(requestID uint64, req protocol.HTTPRequest) 
 
 	buf := make([]byte, streamBufSize)
 	for {
-		n, err := conn.Read(buf)
+		n, err := br.Read(buf)
 		if err != nil {
 			return
 		}

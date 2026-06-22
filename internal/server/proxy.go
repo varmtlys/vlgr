@@ -34,13 +34,6 @@ func isWebSocketUpgrade(r *http.Request) bool {
 			}
 		}
 	}
-	for _, v := range r.Header["Connection"] {
-		for _, part := range strings.Split(v, ",") {
-			if strings.EqualFold(strings.TrimSpace(part), "upgrade") {
-				return true
-			}
-		}
-	}
 	return false
 }
 
