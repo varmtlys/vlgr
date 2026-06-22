@@ -16,6 +16,7 @@ var (
 	token      = flag.String("token", "vlgr-token", "Authentication token")
 	subdomain  = flag.String("subdomain", "", "Request custom subdomain (optional)")
 	useTLS     = flag.Bool("tls", false, "Use WSS (TLS) — required when connecting via Caddy/HTTPS")
+	debug      = flag.Bool("debug", false, "Enable verbose debug logging")
 )
 
 func main() {
@@ -33,6 +34,7 @@ func main() {
 
 	for {
 		tunnel := client.NewTunnel(*serverAddr, *token, uint16(*localPort), *subdomain, *useTLS)
+		tunnel.SetDebug(*debug)
 
 		if err := tunnel.Connect(); err != nil {
 			log.Printf("[client] connection failed: %v, retrying in %v...", err, backoff)

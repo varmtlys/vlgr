@@ -17,7 +17,12 @@ import (
 
 const maxBodySize = 32 << 20
 
-var httpClient = &http.Client{Timeout: 30 * time.Second}
+var httpClient = &http.Client{
+	Timeout: 30 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 type Tunnel struct {
 	serverAddr string
@@ -25,6 +30,7 @@ type Tunnel struct {
 	localPort  uint16
 	subdomain  string
 	useTLS     bool
+	debug      bool
 
 	conn      *websocket.Conn
 	publicURL string
@@ -43,6 +49,10 @@ func NewTunnel(serverAddr, token string, localPort uint16, subdomain string, use
 		useTLS:     useTLS,
 		done:       make(chan struct{}),
 	}
+}
+
+func (t *Tunnel) SetDebug(enabled bool) {
+	t.debug = enabled
 }
 
 func (t *Tunnel) Connect() error {
@@ -192,6 +202,24 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 		return
 	}
 
+	log.Printf("[client] proxying %s %s (body: %d bytes)", req.Method, req.Path, len(req.Body))
+
+	if t.debug {
+		log.Printf("[debug] request headers:")
+		for k, values := range req.Headers {
+			for _, v := range values {
+				log.Printf("[debug]   %s: %s", k, v)
+			}
+		}
+		if len(req.Body) > 0 {
+			bodyPreview := string(req.Body)
+			if len(bodyPreview) > 200 {
+				bodyPreview = bodyPreview[:200] + "..."
+			}
+			log.Printf("[debug] request body: %s", bodyPreview)
+		}
+	}
+
 	targetURL := fmt.Sprintf("http://localhost:%d%s", t.localPort, req.Path)
 	httpReq, err := http.NewRequest(req.Method, targetURL, bytes.NewReader(req.Body))
 	if err != nil {
@@ -200,8 +228,13 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 		return
 	}
 
-	for k, v := range req.Headers {
-		httpReq.Header.Set(k, v)
+	for k, values := range req.Headers {
+		if k == "Content-Length" || k == "Transfer-Encoding" {
+			continue
+		}
+		for _, v := range values {
+			httpReq.Header.Add(k, v)
+		}
 	}
 	httpReq.Header.Set("Host", fmt.Sprintf("localhost:%d", t.localPort))
 
@@ -213,6 +246,18 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 	}
 	defer httpResp.Body.Close()
 
+	statusCode := uint16(httpResp.StatusCode)
+	log.Printf("[client] local response: %d %s", statusCode, http.StatusText(int(statusCode)))
+
+	if t.debug {
+		log.Printf("[debug] response headers:")
+		for k, values := range httpResp.Header {
+			for _, v := range values {
+				log.Printf("[debug]   %s: %s", k, v)
+			}
+		}
+	}
+
 	body, err := io.ReadAll(io.LimitReader(httpResp.Body, maxBodySize))
 	if err != nil {
 		log.Printf("[client] read response body error: %v", err)
@@ -220,15 +265,15 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 		return
 	}
 
-	headers := make(map[string]string)
+	headers := make(map[string][]string)
 	for k, values := range httpResp.Header {
 		if len(values) > 0 {
-			headers[k] = values[0]
+			headers[k] = values
 		}
 	}
 
 	t.writeResponse(frame.RequestID, protocol.HTTPResponse{
-		StatusCode: uint16(httpResp.StatusCode),
+		StatusCode: statusCode,
 		Headers:    headers,
 		Body:       body,
 	})
@@ -255,7 +300,7 @@ func (t *Tunnel) writeResponse(requestID uint64, resp protocol.HTTPResponse) {
 func (t *Tunnel) sendHTTPError(requestID uint64, statusCode uint16, msg string) {
 	t.writeResponse(requestID, protocol.HTTPResponse{
 		StatusCode: statusCode,
-		Headers:    map[string]string{"Content-Type": "text/plain"},
+		Headers:    map[string][]string{"Content-Type": {"text/plain"}},
 		Body:       []byte(msg),
 	})
 }
