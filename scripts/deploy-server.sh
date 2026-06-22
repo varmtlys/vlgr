@@ -68,10 +68,12 @@ fi
 
 # ─── Distro detection ────────────────────────────────────────────────────────
 detect_distro() {
+  DISTRO_ID=""
+  DISTRO_LIKE=""
   if [[ -f /etc/os-release ]]; then
     . /etc/os-release
     DISTRO_ID="$ID"
-    DISTRO_LIKE="$ID_LIKE"
+    DISTRO_LIKE="${ID_LIKE:-}"
   elif [[ -f /etc/debian_version ]]; then
     DISTRO_ID="debian"
   elif [[ -f /etc/redhat-release ]]; then
