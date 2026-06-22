@@ -4,6 +4,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/gorilla/websocket"
 
@@ -14,6 +15,7 @@ var (
 	wsAddr   = flag.String("addr", ":4443", "WebSocket listen address for tunnel clients")
 	httpAddr = flag.String("http", ":8080", "HTTP listen address for public traffic")
 	domain   = flag.String("domain", "localhost:8080", "Base domain for tunnel URLs (e.g. tunnel.example.com)")
+	token    = flag.String("token", "", "Required authentication token for clients (empty = no auth)")
 	debug    = flag.Bool("debug", false, "Enable verbose debug logging")
 )
 
@@ -26,6 +28,10 @@ var upgrader = websocket.Upgrader{
 func main() {
 	flag.Parse()
 
+	if *token == "" {
+		*token = os.Getenv("VLGR_TOKEN")
+	}
+
 	baseDomain := *domain
 	registry := server.NewRegistry()
 	proxy := server.NewReverseProxy(registry, baseDomain, *debug)
@@ -37,7 +43,7 @@ func main() {
 			return
 		}
 
-		handler := server.NewClientHandler(conn, registry, baseDomain, *debug)
+		handler := server.NewClientHandler(conn, registry, baseDomain, *token, *debug)
 		log.Printf("[server] new client connected")
 		handler.Run()
 	})

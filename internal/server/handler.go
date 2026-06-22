@@ -26,11 +26,13 @@ type pendingReq struct {
 }
 
 type ClientHandler struct {
-	conn       *websocket.Conn
-	registry   *Registry
-	tunnel     *Tunnel
-	baseDomain string
-	debug      bool
+	conn          *websocket.Conn
+	registry      *Registry
+	tunnel        *Tunnel
+	baseDomain    string
+	expectedToken string
+	authenticated bool
+	debug         bool
 
 	pending map[uint64]*pendingReq
 	mu      sync.Mutex
@@ -39,14 +41,15 @@ type ClientHandler struct {
 	done chan struct{}
 }
 
-func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain string, debug bool) *ClientHandler {
+func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain string, expectedToken string, debug bool) *ClientHandler {
 	return &ClientHandler{
-		conn:       conn,
-		registry:   registry,
-		baseDomain: baseDomain,
-		debug:      debug,
-		pending:    make(map[uint64]*pendingReq),
-		done:       make(chan struct{}),
+		conn:          conn,
+		registry:      registry,
+		baseDomain:    baseDomain,
+		expectedToken: expectedToken,
+		debug:         debug,
+		pending:       make(map[uint64]*pendingReq),
+		done:          make(chan struct{}),
 	}
 }
 
@@ -89,6 +92,12 @@ func (h *ClientHandler) Run() {
 }
 
 func (h *ClientHandler) handleFrame(frame protocol.Frame) {
+	if !h.authenticated && frame.Type != protocol.MsgAuth {
+		log.Printf("[handler] rejecting message type 0x%02x before auth", frame.Type)
+		h.writeMessage(protocol.MsgAuthErr, 0, 0, []byte("authenticate first"))
+		return
+	}
+
 	switch frame.Type {
 	case protocol.MsgAuth:
 		h.handleAuth(frame)
@@ -125,7 +134,13 @@ func (h *ClientHandler) pingLoop() {
 }
 
 func (h *ClientHandler) handleAuth(frame protocol.Frame) {
-	log.Printf("[handler] client authenticated with token: %s", string(frame.Payload))
+	if h.expectedToken != "" && string(frame.Payload) != h.expectedToken {
+		log.Printf("[handler] auth rejected: invalid token")
+		h.writeMessage(protocol.MsgAuthErr, 0, 0, []byte("invalid token"))
+		return
+	}
+	h.authenticated = true
+	log.Printf("[handler] client authenticated")
 	h.writeMessage(protocol.MsgAuthOK, 0, 0, nil)
 }
 
