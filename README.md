@@ -345,3 +345,66 @@ See [GETTING_STARTED.md](GETTING_STARTED.md) for the full production guide cover
 # Client (your machine)
 ./vlgr-client -server tunnel.domain.com:443 -local 3000 -tls
 ```
+
+---
+
+## Arduino / IoT
+
+VLGR runs on your computer and exposes any local HTTP server to the internet — including IoT devices on your local network (ESP32, ESP8266, Arduino with Ethernet shield, etc.).
+
+### Typical setup
+
+```
+┌──────────────────┐   Wi-Fi / Ethernet    ┌──────────────────┐   WebSocket    ┌──────────────────┐
+│   ESP32 / IoT    │──────────────────────►│   VLGR Client    │◄──────────────►│   VLGR Server    │
+│   192.168.1.42   │     HTTP on LAN       │   (your laptop)  │                │   (VPS, public)  │
+│   :80  web UI    │                       │                  │                │                  │
+└──────────────────┘                       └──────────────────┘                └────────┬─────────┘
+                                                                                        │
+                                                                                 public URL
+                                                                                        │
+                                                                              ┌─────────┴─────────┐
+                                                                              │  External user    │
+                                                                              └───────────────────┘
+```
+
+### Step 1 — Arduino/ESP web server
+
+Example sketch for ESP32 (Arduino IDE):
+
+```cpp
+#include <WiFi.h>
+
+const char* ssid = "YOUR_WIFI";
+const char* password = "YOUR_PASS";
+
+WiFiServer server(80);
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) { delay(500); }
+  Serial.print("IP: "); Serial.println(WiFi.localIP());
+  server.begin();
+}
+
+void loop() {
+  WiFiClient client = server.accept();
+  if (!client) return;
+
+  String request = client.readStringUntil('\r');
+  client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n");
+  client.println("{\"device\":\"ESP32\",\"temp\":23.5,\"uptime\":" + String(millis() / 1000) + "}");
+
+  client.stop();
+}
+```
+
+### Step 2 — Expose with VLGR
+
+```bash
+# Run VLGR client pointing to ESP32's IP and port
+./vlgr-client -server tunnel.domain.com:443 -local 192.168.1.42:80 -tls
+```
+
+The ESP32 web server is now reachable at `https://<subdomain>.tunnel.domain.com` from anywhere.
