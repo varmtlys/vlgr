@@ -5,12 +5,19 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 
 	"vlgr/internal/protocol"
 )
+
+var requestIDCounter uint64
+
+func nextRequestID() uint64 {
+	return atomic.AddUint64(&requestIDCounter, 1)
+}
 
 const (
 	writeWait      = 10 * time.Second
@@ -151,15 +158,13 @@ func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 	}
 
 	localPort := binary.BigEndian.Uint16(frame.Payload[:2])
-
-	var requestedSubdomain string
-	if len(frame.Payload) > 3 {
-		subdomainLen := frame.Payload[2]
-		if int(subdomainLen)+3 <= len(frame.Payload) {
-			requestedSubdomain = string(frame.Payload[3 : 3+subdomainLen])
+	requestedSubdomain := ""
+	if len(frame.Payload) >= 3 {
+		n := int(frame.Payload[2])
+		if len(frame.Payload) >= 3+n {
+			requestedSubdomain = string(frame.Payload[3 : 3+n])
 		}
 	}
-
 	if requestedSubdomain == "" {
 		requestedSubdomain = generateSubdomain()
 	}

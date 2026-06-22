@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -59,18 +58,6 @@ func (r *Registry) Get(subdomain string) *Tunnel {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.tunnels[subdomain]
-}
-
-func (r *Registry) Count() int {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return len(r.tunnels)
-}
-
-var requestIDCounter uint64
-
-func nextRequestID() uint64 {
-	return atomic.AddUint64(&requestIDCounter, 1)
 }
 
 func generateSubdomain() string {

@@ -9,18 +9,12 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 
 	"vlgr/internal/protocol"
-)
-
-const (
-	maxBodySize   = 32 << 20
-	streamBufSize = 32 * 1024
 )
 
 var httpClient = &http.Client{
@@ -251,21 +245,6 @@ func (t *Tunnel) pingLoop() {
 	}
 }
 
-func isWebSocketUpgradeReq(req protocol.HTTPRequest) bool {
-	for k, values := range req.Headers {
-		if strings.EqualFold(k, "Upgrade") {
-			for _, v := range values {
-				for _, part := range strings.Split(v, ",") {
-					if strings.EqualFold(strings.TrimSpace(part), "websocket") {
-						return true
-					}
-				}
-			}
-		}
-	}
-	return false
-}
-
 func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 	req, err := protocol.DecodeHTTPRequest(frame.Payload)
 	if err != nil {
@@ -286,7 +265,7 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 		return
 	}
 
-	if isWebSocketUpgradeReq(req) {
+	if protocol.IsWebSocketUpgradeReq(req) {
 		t.handleWebSocketReq(frame.RequestID, req)
 		return
 	}
@@ -343,7 +322,7 @@ func (t *Tunnel) handleNormalHTTPReq(requestID uint64, req protocol.HTTPRequest)
 	}
 	defer httpResp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(httpResp.Body, maxBodySize))
+	body, err := io.ReadAll(io.LimitReader(httpResp.Body, protocol.MaxBodySize))
 	if err != nil {
 		log.Printf("[client] read response body error: %v", err)
 		t.sendHTTPError(requestID, 502, err.Error())
@@ -485,7 +464,7 @@ func (t *Tunnel) handleWebSocketReq(requestID uint64, req protocol.HTTPRequest) 
 		}
 	}()
 
-	buf := make([]byte, streamBufSize)
+	buf := make([]byte, protocol.StreamBufSize)
 	for {
 		n, err := br.Read(buf)
 		if err != nil {

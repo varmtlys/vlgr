@@ -11,11 +11,6 @@ import (
 	"vlgr/internal/protocol"
 )
 
-const (
-	maxBodySize    = 32 << 20
-	streamBufSize  = 32 * 1024
-)
-
 type ReverseProxy struct {
 	registry   *Registry
 	baseDomain string
@@ -24,17 +19,6 @@ type ReverseProxy struct {
 
 func NewReverseProxy(registry *Registry, baseDomain string, debug bool) *ReverseProxy {
 	return &ReverseProxy{registry: registry, baseDomain: baseDomain, debug: debug}
-}
-
-func isWebSocketUpgrade(r *http.Request) bool {
-	for _, v := range r.Header["Upgrade"] {
-		for _, part := range strings.Split(v, ",") {
-			if strings.EqualFold(strings.TrimSpace(part), "websocket") {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -50,7 +34,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
+	body, err := io.ReadAll(io.LimitReader(r.Body, protocol.MaxBodySize))
 	if err != nil {
 		http.Error(w, "failed to read request body", http.StatusInternalServerError)
 		return
@@ -91,7 +75,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var streamData chan []byte
-	if isWebSocketUpgrade(r) {
+	if protocol.IsWebSocketUpgrade(r) {
 		streamData = make(chan []byte, 256)
 		if p.debug {
 			log.Printf("[debug] WebSocket upgrade detected for %s", r.URL.RequestURI())
@@ -149,7 +133,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		defer wg.Done()
-		buf := make([]byte, streamBufSize)
+		buf := make([]byte, protocol.StreamBufSize)
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {

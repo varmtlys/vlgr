@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"net/http"
+	"strings"
 )
 
 const (
@@ -20,9 +22,11 @@ const (
 	MsgError       byte = 0x0A
 	MsgStreamData  byte = 0x0B
 	MsgStreamClose byte = 0x0C
-)
 
-const HeaderSize = 21
+	HeaderSize    = 21
+	MaxBodySize   = 32 << 20
+	StreamBufSize = 32 * 1024
+)
 
 type Frame struct {
 	Type      byte
@@ -88,26 +92,54 @@ func readString(reader *bytes.Reader) (string, error) {
 	return string(buf), nil
 }
 
-func EncodeHTTPRequest(req HTTPRequest) []byte {
-	var buf bytes.Buffer
-
-	writeString(&buf, req.Method)
-	writeString(&buf, req.Path)
-
-	binary.Write(&buf, binary.BigEndian, uint32(len(req.Headers)))
-	for k, values := range req.Headers {
-		writeString(&buf, k)
-		binary.Write(&buf, binary.BigEndian, uint32(len(values)))
+func writeHeaders(buf *bytes.Buffer, headers map[string][]string) {
+	binary.Write(buf, binary.BigEndian, uint32(len(headers)))
+	for k, values := range headers {
+		writeString(buf, k)
+		binary.Write(buf, binary.BigEndian, uint32(len(values)))
 		for _, v := range values {
-			writeString(&buf, v)
+			writeString(buf, v)
 		}
 	}
+}
 
+func readHeaders(reader *bytes.Reader) (map[string][]string, error) {
+	var count uint32
+	if err := binary.Read(reader, binary.BigEndian, &count); err != nil {
+		return nil, fmt.Errorf("read header count: %w", err)
+	}
+	headers := make(map[string][]string, count)
+	for i := uint32(0); i < count; i++ {
+		k, err := readString(reader)
+		if err != nil {
+			return nil, fmt.Errorf("read header key: %w", err)
+		}
+		var valueCount uint32
+		if err := binary.Read(reader, binary.BigEndian, &valueCount); err != nil {
+			return nil, fmt.Errorf("read header value count: %w", err)
+		}
+		values := make([]string, valueCount)
+		for j := uint32(0); j < valueCount; j++ {
+			v, err := readString(reader)
+			if err != nil {
+				return nil, fmt.Errorf("read header value: %w", err)
+			}
+			values[j] = v
+		}
+		headers[k] = values
+	}
+	return headers, nil
+}
+
+func EncodeHTTPRequest(req HTTPRequest) []byte {
+	var buf bytes.Buffer
+	writeString(&buf, req.Method)
+	writeString(&buf, req.Path)
+	writeHeaders(&buf, req.Headers)
 	binary.Write(&buf, binary.BigEndian, uint32(len(req.Body)))
 	if len(req.Body) > 0 {
 		buf.Write(req.Body)
 	}
-
 	return buf.Bytes()
 }
 
@@ -127,31 +159,11 @@ func DecodeHTTPRequest(data []byte) (HTTPRequest, error) {
 	}
 	req.Path = path
 
-	var headerCount uint32
-	if err := binary.Read(reader, binary.BigEndian, &headerCount); err != nil {
-		return req, fmt.Errorf("read header count: %w", err)
+	headers, err := readHeaders(reader)
+	if err != nil {
+		return req, err
 	}
-
-	req.Headers = make(map[string][]string, headerCount)
-	for i := uint32(0); i < headerCount; i++ {
-		k, err := readString(reader)
-		if err != nil {
-			return req, fmt.Errorf("read header key: %w", err)
-		}
-		var valueCount uint32
-		if err := binary.Read(reader, binary.BigEndian, &valueCount); err != nil {
-			return req, fmt.Errorf("read header value count: %w", err)
-		}
-		values := make([]string, valueCount)
-		for j := uint32(0); j < valueCount; j++ {
-			v, err := readString(reader)
-			if err != nil {
-				return req, fmt.Errorf("read header value: %w", err)
-			}
-			values[j] = v
-		}
-		req.Headers[k] = values
-	}
+	req.Headers = headers
 
 	var bodyLen uint32
 	if err := binary.Read(reader, binary.BigEndian, &bodyLen); err != nil {
@@ -167,23 +179,12 @@ func DecodeHTTPRequest(data []byte) (HTTPRequest, error) {
 
 func EncodeHTTPResponse(resp HTTPResponse) []byte {
 	var buf bytes.Buffer
-
 	binary.Write(&buf, binary.BigEndian, resp.StatusCode)
-
-	binary.Write(&buf, binary.BigEndian, uint32(len(resp.Headers)))
-	for k, values := range resp.Headers {
-		writeString(&buf, k)
-		binary.Write(&buf, binary.BigEndian, uint32(len(values)))
-		for _, v := range values {
-			writeString(&buf, v)
-		}
-	}
-
+	writeHeaders(&buf, resp.Headers)
 	binary.Write(&buf, binary.BigEndian, uint32(len(resp.Body)))
 	if len(resp.Body) > 0 {
 		buf.Write(resp.Body)
 	}
-
 	return buf.Bytes()
 }
 
@@ -195,31 +196,11 @@ func DecodeHTTPResponse(data []byte) (HTTPResponse, error) {
 		return resp, fmt.Errorf("read status code: %w", err)
 	}
 
-	var headerCount uint32
-	if err := binary.Read(reader, binary.BigEndian, &headerCount); err != nil {
-		return resp, fmt.Errorf("read header count: %w", err)
+	headers, err := readHeaders(reader)
+	if err != nil {
+		return resp, err
 	}
-
-	resp.Headers = make(map[string][]string, headerCount)
-	for i := uint32(0); i < headerCount; i++ {
-		k, err := readString(reader)
-		if err != nil {
-			return resp, fmt.Errorf("read header key: %w", err)
-		}
-		var valueCount uint32
-		if err := binary.Read(reader, binary.BigEndian, &valueCount); err != nil {
-			return resp, fmt.Errorf("read header value count: %w", err)
-		}
-		values := make([]string, valueCount)
-		for j := uint32(0); j < valueCount; j++ {
-			v, err := readString(reader)
-			if err != nil {
-				return resp, fmt.Errorf("read header value: %w", err)
-			}
-			values[j] = v
-		}
-		resp.Headers[k] = values
-	}
+	resp.Headers = headers
 
 	var bodyLen uint32
 	if err := binary.Read(reader, binary.BigEndian, &bodyLen); err != nil {
@@ -231,4 +212,30 @@ func DecodeHTTPResponse(data []byte) (HTTPResponse, error) {
 	}
 
 	return resp, nil
+}
+
+func IsWebSocketUpgrade(r *http.Request) bool {
+	for _, v := range r.Header["Upgrade"] {
+		for _, part := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), "websocket") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func IsWebSocketUpgradeReq(req HTTPRequest) bool {
+	for k, values := range req.Headers {
+		if strings.EqualFold(k, "Upgrade") {
+			for _, v := range values {
+				for _, part := range strings.Split(v, ",") {
+					if strings.EqualFold(strings.TrimSpace(part), "websocket") {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
