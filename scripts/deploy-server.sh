@@ -59,13 +59,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$DOMAIN" ]]; then
+if [[ -z "$DOMAIN" ]] && ! $UNINSTALL; then
   echo "Usage: $0 -d <domain> [-t <token>] [options]"
   echo "  -d <domain>  Base domain (required, e.g. tunnel.example.com)"
   exit 1
 fi
 
-if [[ -z "$TOKEN" ]]; then
+if ! $UNINSTALL && [[ -z "$TOKEN" ]]; then
   TOKEN="vlgr-$(tr -dc a-f0-9 < /dev/urandom | head -c 16 2>/dev/null || openssl rand -hex 8)"
 fi
 
