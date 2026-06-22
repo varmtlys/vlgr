@@ -30,6 +30,59 @@ VLGR binds only to `127.0.0.1`. All TLS termination and routing is handled by Ca
 
 ---
 
+## Quick Deploy (Auto)
+
+The [`deploy-server.sh`](scripts/deploy-server.sh) script automates the entire VPS setup — installs Go, builds the server, creates a systemd service, and optionally installs Caddy with Cloudflare DNS plugin.
+
+### One-liner (requires root)
+
+```bash
+curl -sL https://github.com/varmtlys/vlgr/raw/main/scripts/deploy-server.sh | sudo bash -s -- \
+  -d tunnel.example.com -t mysecret
+```
+
+### Locally
+
+```bash
+sudo ./scripts/deploy-server.sh -d tunnel.example.com -t mysecret --caddy --cf-token <CF_API_TOKEN>
+```
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `-d <domain>` | Base domain (required, e.g. `tunnel.example.com`) |
+| `-t <token>` | Auth token for clients (default: auto-generated) |
+| `-U <user>` | System user for the service (default: `nobody`) |
+| `-g <group>` | System group (auto-detected per distro) |
+| `-p <path>` | Install path (default: `/opt/vlgr`) |
+| `--caddy` | Install & configure Caddy with Cloudflare DNS plugin |
+| `--cf-token <t>` | Cloudflare API token (requires `--caddy`) |
+| `--no-service` | Skip systemd service creation |
+| `--no-build` | Skip Go build (use pre-built `build/linux/vlgr-server`) |
+| `-u, --uninstall` | Remove VLGR server, service, binary and config |
+
+### What it does
+
+1. Detects your Linux distro (Debian, Ubuntu, RHEL, Arch, Alpine, openSUSE, Void)
+2. Installs dependencies (git, curl, wget) and Go 1.22+
+3. Creates a dedicated system user (default: `nobody`)
+4. Sets up directories (`/opt/vlgr/bin`, `/opt/vlgr/logs`, `/etc/vlgr`)
+5. Clones the repo and builds `vlgr-server` with `-s -w` trimmed binary
+6. Writes config to `/etc/vlgr/vlgr-server.conf`
+7. Creates and enables a systemd service (`vlgr-server`)
+8. Optionally installs Caddy, adds Cloudflare DNS plugin, appends reverse-proxy config
+
+After the script finishes, the server is running and ready for clients:
+
+```bash
+./vlgr-client -server tunnel.example.com:443 -local 3000 -tls -token <token>
+```
+
+> The auto-deploy script automates Steps 1–6 below. For a manual setup or to understand each component, follow the detailed guide.
+
+---
+
 ## Step 1: Cloudflare DNS
 
 Go to Cloudflare Dashboard → DNS → Records. Add two A records:

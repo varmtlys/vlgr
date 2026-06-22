@@ -67,7 +67,8 @@ vlgr/
 │
 ├── scripts/
 │   ├── build.ps1                   # Build for Windows + Linux (PowerShell)
-│   └── build.sh                    # Build for Linux + Windows (Bash)
+│   ├── build.sh                    # Build for Linux + Windows (Bash)
+│   └── deploy-server.sh            # One-command auto-deploy for VPS (multi-distro)
 │
 └── docs/
     └── Caddyfile                   # Caddy config reference
@@ -335,6 +336,20 @@ See [GETTING_STARTED.md](GETTING_STARTED.md) for the full production guide cover
 - Caddy rebuild with Cloudflare DNS plugin
 - VLGR server systemd unit
 - Client connection via WSS
+
+### Auto-deploy (one command)
+
+The [`scripts/deploy-server.sh`](scripts/deploy-server.sh) script automates the entire VPS setup — installs Go, builds the server, creates a systemd service, and optionally installs Caddy with Cloudflare DNS plugin. Supports Debian/Ubuntu, RHEL/Fedora, Arch, Alpine, openSUSE, and Void.
+
+```bash
+# From the web (as root):
+curl -sL https://github.com/varmtlys/vlgr/raw/main/scripts/deploy-server.sh | sudo bash -s -- \
+  -d tunnel.example.com -t my-token
+
+# Or locally with Caddy + Cloudflare:
+sudo ./scripts/deploy-server.sh -d tunnel.example.com -t my-token \
+  --caddy --cf-token <CF_API_TOKEN>
+```
 
 ### Quick production commands
 
