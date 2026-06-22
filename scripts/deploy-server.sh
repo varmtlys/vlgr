@@ -208,8 +208,9 @@ build_server() {
       log "Building from cached source at ${INSTALL_PATH}/src..."
       cd "${INSTALL_PATH}/src"
     else
-      warn "No local source found. Use --no-build with a pre-built binary, or run this script from the vlgr repo."
-      exit 1
+      log "Cloning repository to ${INSTALL_PATH}/src..."
+      git clone --depth 1 "$REPO_URL" "${INSTALL_PATH}/src"
+      cd "${INSTALL_PATH}/src"
     fi
   fi
 
