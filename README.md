@@ -350,61 +350,120 @@ See [GETTING_STARTED.md](GETTING_STARTED.md) for the full production guide cover
 
 ## Arduino / IoT
 
-VLGR runs on your computer and exposes any local HTTP server to the internet — including IoT devices on your local network (ESP32, ESP8266, Arduino with Ethernet shield, etc.).
+VLGR's protocol is simple enough to implement directly on microcontrollers. The ESP32 below connects to WiFi behind NAT, runs the full VLGR tunnel client, and serves HTTP responses — no separate computer needed.
 
-### Typical setup
+### Architecture
 
 ```
-┌──────────────────┐   Wi-Fi / Ethernet    ┌──────────────────┐   WebSocket    ┌──────────────────┐
-│   ESP32 / IoT    │──────────────────────►│   VLGR Client    │◄──────────────►│   VLGR Server    │
-│   192.168.1.42   │     HTTP on LAN       │   (your laptop)  │                │   (VPS, public)  │
-│   :80  web UI    │                       │                  │                │                  │
-└──────────────────┘                       └──────────────────┘                └────────┬─────────┘
-                                                                                        │
-                                                                                 public URL
-                                                                                        │
-                                                                              ┌─────────┴─────────┐
-                                                                              │  External user    │
-                                                                              └───────────────────┘
+┌────────────────────────────────────┐   WebSocket (WSS)    ┌──────────────────────┐
+│  ESP32 (behind NAT)                │◄═══════════════════►│  VLGR Server         │
+│                                    │                      │  (VPS, public IP)    │
+│  • WiFi connection                 │                      │                      │
+│  • VLGR binary protocol over WS    │                      │  :4443  WebSocket    │
+│  • Handles HTTP requests inline    │                      │  :8080  HTTP         │
+│                                    │                      └──────────┬───────────┘
+└────────────────────────────────────┘                                 │
+                                                               HTTPS request
+                                                                       │
+                                                            ┌──────────┴──────────┐
+                                                            │  External user      │
+                                                            │  (browser, curl)    │
+                                                            └─────────────────────┘
 ```
 
-### Step 1 — Arduino/ESP web server
+### Complete ESP32 sketch (minimal)
 
-Example sketch for ESP32 (Arduino IDE):
+The sketch implements the full VLGR client protocol directly on ESP32. It connects to WiFi, authenticates with the VLGR server, registers a tunnel, and responds to HTTP requests with device telemetry.
+
+**Required library:** [WebSockets by Markus Sattler](https://github.com/Links2004/arduinoWebSockets)
 
 ```cpp
 #include <WiFi.h>
+#include <WebSocketsClient.h>
 
-const char* ssid = "YOUR_WIFI";
-const char* password = "YOUR_PASS";
+const char* ssid = "YOUR_WIFI", *password = "YOUR_PASS";
+const char* serverHost = "tunnel.domain.com";
+const uint16_t serverPort = 443;
+const bool useTLS = true;
+const char* authToken = "vlgr-token";
 
-WiFiServer server(80);
+WebSocketsClient ws;
+uint64_t tunnelID = 0;
+
+void w16(uint8_t* p, uint16_t v) { p[0]=v>>8; p[1]=v; }
+void w32(uint8_t* p, uint32_t v) { p[0]=v>>24; p[1]=v>>16; p[2]=v>>8; p[3]=v; }
+void w64(uint8_t* p, uint64_t v) { for(int i=7;i>=0;i--){p[i]=v&0xFF;v>>=8;} }
+uint64_t r64(const uint8_t* p) { uint64_t v=0; for(int i=0;i<8;i++) v=(v<<8)|p[i]; return v; }
+uint32_t r32(const uint8_t* p) { return ((uint32_t)p[0]<<24)|((uint32_t)p[1]<<16)|((uint32_t)p[2]<<8)|p[3]; }
+uint16_t r16(const uint8_t* p) { return (p[0]<<8)|p[1]; }
+
+void sendFrame(uint8_t type, uint64_t tunID, uint64_t reqID,
+               const uint8_t* payload, uint32_t len) {
+  uint32_t total = 21 + len;
+  uint8_t* msg = new uint8_t[total];
+  msg[0] = type;
+  w64(&msg[1], tunID); w64(&msg[9], reqID); w32(&msg[17], len);
+  if (len) memcpy(&msg[21], payload, len);
+  ws.sendBIN(msg, total);
+  delete[] msg;
+}
+
+void webSocketEvent(WStype_t t, uint8_t* d, size_t l) {
+  if (t == WStype_CONNECTED) {
+    Serial.println("> auth");
+    sendFrame(0x01, 0, 0, (uint8_t*)authToken, strlen(authToken));
+    return;
+  }
+  if (t != WStype_BIN || l < 21) return;
+
+  uint8_t mt = d[0];
+  uint32_t pl = r32(&d[17]);
+  uint8_t* fp = (l >= 21+pl) ? &d[21] : nullptr;
+
+  if (mt == 0x02) {
+    Serial.println("> register");
+    uint8_t rp[2] = {0,80};
+    sendFrame(0x04, 0, 0, rp, 2);
+  } else if (mt == 0x05 && fp && pl >= 9) {
+    tunnelID = r64(&fp[1+fp[0]]);
+    char url[128]; memcpy(url, &fp[1], fp[0]); url[fp[0]]=0;
+    Serial.printf("> ready: %s\n", url);
+  } else if (mt == 0x07 && fp) {
+    uint16_t mlen = r16(&fp[0]);
+    uint16_t plen = r16(&fp[2+mlen]);
+    uint16_t cp = plen < 63 ? plen : 63; char path[64]; memcpy(path, &fp[4+mlen], cp); path[cp]=0;
+    char body[256]; snprintf(body, sizeof(body),
+      "{\"d\":\"ESP32\",\"p\":\"%s\",\"u\":%lu}", path, millis()/1000);
+    uint16_t blen = strlen(body);
+    uint32_t rlen = 42 + blen;
+    uint8_t* rp = new uint8_t[rlen];
+    uint32_t o=0;
+    w16(&rp[o],200); o+=2;
+    w32(&rp[o],1); o+=4;
+    w16(&rp[o],12); memcpy(&rp[o+2],"Content-Type",12); o+=14;
+    w16(&rp[o],16); memcpy(&rp[o+2],"application/json",16); o+=18;
+    w32(&rp[o],blen); memcpy(&rp[o+4],body,blen);
+    sendFrame(0x08, tunnelID, r64(&d[9]), rp, rlen);
+    delete[] rp;
+  }
+}
 
 void setup() {
   Serial.begin(115200);
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) { delay(500); }
-  Serial.print("IP: "); Serial.println(WiFi.localIP());
-  server.begin();
+  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+  Serial.printf("\nIP: %s\n", WiFi.localIP().toString().c_str());
+  if (useTLS) ws.beginSSL(serverHost, serverPort, "/_tunnel");
+  else ws.begin(serverHost, serverPort, "/_tunnel");
+  ws.onEvent(webSocketEvent);
 }
 
-void loop() {
-  WiFiClient client = server.accept();
-  if (!client) return;
-
-  String request = client.readStringUntil('\r');
-  client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n");
-  client.println("{\"device\":\"ESP32\",\"temp\":23.5,\"uptime\":" + String(millis() / 1000) + "}");
-
-  client.stop();
-}
+void loop() { ws.loop(); }
 ```
 
-### Step 2 — Expose with VLGR
+### How to use
 
-```bash
-# Run VLGR client pointing to ESP32's IP and port
-./vlgr-client -server tunnel.domain.com:443 -local 192.168.1.42:80 -tls
-```
-
-The ESP32 web server is now reachable at `https://<subdomain>.tunnel.domain.com` from anywhere.
+1. Install the [WebSockets library](https://github.com/Links2004/arduinoWebSockets) in Arduino IDE.
+2. Set `ssid`, `password`, `serverHost`, and `authToken`.
+3. Flash to ESP32. Open Serial Monitor — you'll see `ready: <url>`.
+4. Access device from anywhere at `https://<url>`.
