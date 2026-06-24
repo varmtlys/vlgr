@@ -141,6 +141,9 @@ func (t *Tunnel) Connect() error {
 		if regResp.Type == protocol.MsgRegisterErr {
 			return fmt.Errorf("registration for port %d failed: %s", port, string(regResp.Payload))
 		}
+		if regResp.Type == protocol.MsgError {
+			return fmt.Errorf("registration for port %d failed: %s", port, string(regResp.Payload))
+		}
 		if regResp.Type != protocol.MsgRegisterOK {
 			return fmt.Errorf("unexpected register response type for port %d: 0x%02x", port, regResp.Type)
 		}

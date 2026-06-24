@@ -172,7 +172,7 @@ func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 
 	tunnel, err := h.registry.Register(requestedSubdomain, localPort, h)
 	if err != nil {
-		h.writeError(frame.TunnelID, err.Error())
+		h.writeMessage(protocol.MsgRegisterErr, 0, 0, []byte(err.Error()))
 		return
 	}
 
