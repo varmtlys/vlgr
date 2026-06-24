@@ -28,8 +28,8 @@ You run a web server on `localhost:3000`. No public IP, behind NAT. VLGR exposes
 │   (your laptop)  │     control channel        │   (VPS, public IP)  │
 │                  │                            │                     │
 │  localhost:3000  │                            │  :4443  WebSocket   │
-│                  │                            │  :8080  HTTP        │
-└──────────────────┘                            └──────────┬──────────┘
+└──────────────────┘                            │  :8080  HTTP        │
+                                                └──────────┬──────────┘
                                                            │
                                                     HTTPS request
                                                            │
@@ -370,20 +370,20 @@ VLGR's protocol is simple enough to implement directly on microcontrollers. The 
 ### Architecture
 
 ```
-┌────────────────────────────────────┐   WebSocket (WSS)    ┌──────────────────────┐
-│  ESP32 (behind NAT)                │◄═══════════════════►│  VLGR Server         │
-│                                    │                      │  (VPS, public IP)    │
-│  • WiFi connection                 │                      │                      │
-│  • VLGR binary protocol over WS    │                      │  :4443  WebSocket    │
-│  • Handles HTTP requests inline    │                      │  :8080  HTTP         │
-│                                    │                      └──────────┬───────────┘
-└────────────────────────────────────┘                                 │
+┌───────────────────────────────────┐   WebSocket (WSS)   ┌────────────────────┐
+│  ESP32 (behind NAT)               │◄═══════════════════►│  VLGR Server       │
+│                                   │                     │  (VPS, public IP)  │
+│  • WiFi connection                │                     │                    │
+│  • VLGR binary protocol over WS   │                     │  :4443  WebSocket  │
+│  • Handles HTTP requests inline   │                     │  :8080  HTTP       │
+└───────────────────────────────────┘                     └──────────┬─────────┘
+                                                                     │
                                                                HTTPS request
-                                                                       │
-                                                            ┌──────────┴──────────┐
-                                                            │  External user      │
-                                                            │  (browser, curl)    │
-                                                            └─────────────────────┘
+                                                                     │
+                                                          ┌──────────┴─────────┐
+                                                          │  External user     │
+                                                          │  (browser, curl)   │
+                                                          └────────────────────┘
 ```
 
 ### Complete ESP32 sketch (minimal)
