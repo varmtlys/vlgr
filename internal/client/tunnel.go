@@ -242,7 +242,11 @@ func (t *Tunnel) handleStreamClose(frame protocol.Frame) {
 	t.relaysMu.Unlock()
 
 	if ok {
-		close(relay.done)
+		select {
+		case <-relay.done:
+		default:
+			close(relay.done)
+		}
 		relay.conn.Close()
 	}
 }
@@ -479,10 +483,14 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 	}
 
 	defer func() {
+		select {
+		case <-relay.done:
+		default:
+			close(relay.done)
+		}
 		t.relaysMu.Lock()
 		delete(t.relays, requestID)
 		t.relaysMu.Unlock()
-		close(relay.done)
 		conn.Close()
 		t.writeFrame(protocol.Frame{
 			Type:      protocol.MsgStreamClose,
