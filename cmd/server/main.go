@@ -14,7 +14,7 @@ import (
 var (
 	wsAddr   = flag.String("addr", ":4443", "WebSocket listen address for tunnel clients")
 	httpAddr = flag.String("http", ":8080", "HTTP listen address for public traffic")
-	domain   = flag.String("domain", "localhost:8080", "Base domain for tunnel URLs (e.g. tunnel.example.com)")
+	domain   = flag.String("domain", "localhost:8080", "Base domain for tunnel URLs (e.g. tunnel.domain.com)")
 	token    = flag.String("token", "", "Required authentication token for clients (empty = no auth)")
 	debug    = flag.Bool("debug", false, "Enable verbose debug logging")
 )

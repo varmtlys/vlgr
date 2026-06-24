@@ -5,13 +5,13 @@
 #
 # Usage:
 #   curl -sL https://github.com/varmtlys/vlgr/raw/main/scripts/deploy-server.sh | sudo bash -s -- \
-#     -d tunnel.example.com -t mytoken
+#     -d tunnel.domain.com -t mytoken
 #
 #   # Or locally:
-#   sudo ./scripts/deploy-server.sh -d tunnel.example.com -t mytoken
+#   sudo ./scripts/deploy-server.sh -d tunnel.domain.com -t mytoken
 #
 # Options:
-#   -d <domain>     Base domain (required, e.g. tunnel.example.com)
+#   -d <domain>     Base domain (required, e.g. tunnel.domain.com)
 #   -t <token>      Auth token for clients (default: auto-generated)
 #   -U <user>       System user to run the service (default: nobody)
 #   -g <group>      System group (default: nogroup on Debian, nobody on RHEL)
@@ -61,7 +61,7 @@ done
 
 if [[ -z "$DOMAIN" ]] && ! $UNINSTALL; then
   echo "Usage: $0 -d <domain> [-t <token>] [options]"
-  echo "  -d <domain>  Base domain (required, e.g. tunnel.example.com)"
+  echo "  -d <domain>  Base domain (required, e.g. tunnel.domain.com)"
   exit 1
 fi
 

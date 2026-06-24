@@ -308,7 +308,7 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 |---|---|---|
 | `-addr` | `:4443` | WebSocket listen address for tunnel clients |
 | `-http` | `:8080` | HTTP listen address for public traffic |
-| `-domain` | `localhost:8080` | Base domain for tunnel URLs (e.g. `tunnel.example.com`) |
+| `-domain` | `localhost:8080` | Base domain for tunnel URLs (e.g. `tunnel.domain.com`) |
 
 ### Client (`cmd/client`)
 
@@ -341,10 +341,10 @@ The [`scripts/deploy-server.sh`](scripts/deploy-server.sh) script automates the 
 ```bash
 # From the web (as root):
 curl -sL https://github.com/varmtlys/vlgr/raw/main/scripts/deploy-server.sh | sudo bash -s -- \
-  -d tunnel.example.com -t my-token
+  -d tunnel.domain.com -t my-token
 
 # Or locally with Caddy + Cloudflare:
-sudo ./scripts/deploy-server.sh -d tunnel.example.com -t my-token \
+sudo ./scripts/deploy-server.sh -d tunnel.domain.com -t my-token \
   --caddy --cf-token <CF_API_TOKEN>
 ```
 

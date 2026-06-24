@@ -38,20 +38,20 @@ The [`deploy-server.sh`](scripts/deploy-server.sh) script automates the entire V
 
 ```bash
 curl -sL https://github.com/varmtlys/vlgr/raw/main/scripts/deploy-server.sh | sudo bash -s -- \
-  -d tunnel.example.com -t mysecret
+  -d tunnel.domain.com -t mysecret
 ```
 
 ### Locally
 
 ```bash
-sudo ./scripts/deploy-server.sh -d tunnel.example.com -t mysecret --caddy --cf-token <CF_API_TOKEN>
+sudo ./scripts/deploy-server.sh -d tunnel.domain.com -t mysecret --caddy --cf-token <CF_API_TOKEN>
 ```
 
 ### Options
 
 | Flag | Description |
 |------|-------------|
-| `-d <domain>` | Base domain (required, e.g. `tunnel.example.com`) |
+| `-d <domain>` | Base domain (required, e.g. `tunnel.domain.com`) |
 | `-t <token>` | Auth token for clients (default: auto-generated) |
 | `-U <user>` | System user for the service (default: `nobody`) |
 | `-g <group>` | System group (auto-detected per distro) |
@@ -76,10 +76,10 @@ sudo ./scripts/deploy-server.sh -d tunnel.example.com -t mysecret --caddy --cf-t
 After the script finishes, the server is running and ready for clients:
 
 ```bash
-./vlgr-client -server tunnel.example.com:443 -local 3000 -tls -token <token>
+./vlgr-client -server tunnel.domain.com:443 -local 3000 -tls -token <token>
 
 # Multiple tunnels (ports match subdomains by position):
-./vlgr-client -server tunnel.example.com:443 -local "8080,3000,5000" -subdomain "api,web,admin" -tls -token <token>
+./vlgr-client -server tunnel.domain.com:443 -local "8080,3000,5000" -subdomain "api,web,admin" -tls -token <token>
 ```
 
 > The auto-deploy script automates Steps 1–6 below. For a manual setup or to understand each component, follow the detailed guide.
