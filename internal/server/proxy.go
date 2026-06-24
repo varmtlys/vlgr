@@ -82,7 +82,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	requestID, resp, cleanup, err := tunnel.Handler.ForwardHTTP(req, streamData)
+	requestID, resp, cleanup, err := tunnel.Handler.ForwardHTTP(tunnel.ID, req, streamData)
 	if err != nil {
 		log.Printf("[proxy] forward error for %s: %v", subdomain, err)
 		http.Error(w, "tunnel error", http.StatusBadGateway)

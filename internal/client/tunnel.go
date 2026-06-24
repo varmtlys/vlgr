@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,14 +34,15 @@ type streamRelay struct {
 type Tunnel struct {
 	serverAddr string
 	token      string
-	localPort  uint16
-	subdomain  string
+	ports      []uint16
+	subdomains []string
 	useTLS     bool
 	debug      bool
 
 	conn      *websocket.Conn
 	publicURL string
-	tunnelID  uint64
+
+	mappings map[uint64]uint16
 
 	writeMu sync.Mutex
 	done    chan struct{}
@@ -49,14 +51,15 @@ type Tunnel struct {
 	relaysMu sync.Mutex
 }
 
-func NewTunnel(serverAddr, token string, localPort uint16, subdomain string, useTLS bool) *Tunnel {
+func NewTunnel(serverAddr, token string, ports []uint16, subdomains []string, useTLS bool) *Tunnel {
 	return &Tunnel{
 		serverAddr: serverAddr,
 		token:      token,
-		localPort:  localPort,
-		subdomain:  subdomain,
+		ports:      ports,
+		subdomains: subdomains,
 		useTLS:     useTLS,
 		done:       make(chan struct{}),
+		mappings:   make(map[uint64]uint16),
 		relays:     make(map[uint64]*streamRelay),
 	}
 }
@@ -105,48 +108,60 @@ func (t *Tunnel) Connect() error {
 	}
 	log.Printf("[client] authenticated")
 
-	regPayload := make([]byte, 2)
-	binary.BigEndian.PutUint16(regPayload, t.localPort)
-	if t.subdomain != "" {
-		regPayload = append(regPayload, byte(len(t.subdomain)))
-		regPayload = append(regPayload, []byte(t.subdomain)...)
+	var urls []string
+	for i, port := range t.ports {
+		subdomain := ""
+		if i < len(t.subdomains) {
+			subdomain = t.subdomains[i]
+		}
+
+		regPayload := make([]byte, 2)
+		binary.BigEndian.PutUint16(regPayload, port)
+		if subdomain != "" {
+			regPayload = append(regPayload, byte(len(subdomain)))
+			regPayload = append(regPayload, []byte(subdomain)...)
+		}
+
+		regFrame := protocol.EncodeFrame(protocol.Frame{
+			Type:    protocol.MsgRegister,
+			Payload: regPayload,
+		})
+		if err := conn.WriteMessage(websocket.BinaryMessage, regFrame); err != nil {
+			return fmt.Errorf("send register for port %d: %w", port, err)
+		}
+
+		_, msg, err = conn.ReadMessage()
+		if err != nil {
+			return fmt.Errorf("read register response for port %d: %w", port, err)
+		}
+		regResp, err := protocol.DecodeFrame(msg)
+		if err != nil {
+			return fmt.Errorf("decode register response for port %d: %w", port, err)
+		}
+		if regResp.Type == protocol.MsgRegisterErr {
+			return fmt.Errorf("registration for port %d failed: %s", port, string(regResp.Payload))
+		}
+		if regResp.Type != protocol.MsgRegisterOK {
+			return fmt.Errorf("unexpected register response type for port %d: 0x%02x", port, regResp.Type)
+		}
+
+		payload := regResp.Payload
+		if len(payload) < 1 {
+			return fmt.Errorf("register response for port %d too short", port)
+		}
+		urlLen := payload[0]
+		if len(payload) < 1+int(urlLen)+8 {
+			return fmt.Errorf("register response for port %d truncated", port)
+		}
+		publicURL := string(payload[1 : 1+urlLen])
+		tunnelID := binary.BigEndian.Uint64(payload[1+urlLen:])
+		t.mappings[tunnelID] = port
+
+		urls = append(urls, publicURL)
+		log.Printf("[client] tunnel ready: %s -> localhost:%d", publicURL, port)
 	}
 
-	regFrame := protocol.EncodeFrame(protocol.Frame{
-		Type:    protocol.MsgRegister,
-		Payload: regPayload,
-	})
-	if err := conn.WriteMessage(websocket.BinaryMessage, regFrame); err != nil {
-		return fmt.Errorf("send register: %w", err)
-	}
-
-	_, msg, err = conn.ReadMessage()
-	if err != nil {
-		return fmt.Errorf("read register response: %w", err)
-	}
-	regResp, err := protocol.DecodeFrame(msg)
-	if err != nil {
-		return fmt.Errorf("decode register response: %w", err)
-	}
-	if regResp.Type == protocol.MsgRegisterErr {
-		return fmt.Errorf("registration failed: %s", string(regResp.Payload))
-	}
-	if regResp.Type != protocol.MsgRegisterOK {
-		return fmt.Errorf("unexpected register response type: 0x%02x", regResp.Type)
-	}
-
-	payload := regResp.Payload
-	if len(payload) < 1 {
-		return fmt.Errorf("register response too short")
-	}
-	urlLen := payload[0]
-	if len(payload) < 1+int(urlLen)+8 {
-		return fmt.Errorf("register response truncated")
-	}
-	t.publicURL = string(payload[1 : 1+urlLen])
-	t.tunnelID = binary.BigEndian.Uint64(payload[1+urlLen:])
-
-	log.Printf("[client] tunnel ready: %s -> localhost:%d", t.publicURL, t.localPort)
+	t.publicURL = strings.Join(urls, ", ")
 	return nil
 }
 
@@ -245,6 +260,16 @@ func (t *Tunnel) pingLoop() {
 	}
 }
 
+func (t *Tunnel) portFor(tunnelID uint64) uint16 {
+	if port, ok := t.mappings[tunnelID]; ok {
+		return port
+	}
+	if len(t.ports) > 0 {
+		return t.ports[0]
+	}
+	return 0
+}
+
 func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 	req, err := protocol.DecodeHTTPRequest(frame.Payload)
 	if err != nil {
@@ -261,20 +286,21 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 			}
 			log.Printf("[debug] request payload text: %q", textPreview)
 		}
-		t.sendHTTPError(frame.RequestID, 502, err.Error())
+		t.sendHTTPError(frame.TunnelID, frame.RequestID, 502, err.Error())
 		return
 	}
 
 	if protocol.IsWebSocketUpgradeReq(req) {
-		t.handleWebSocketReq(frame.RequestID, req)
+		t.handleWebSocketReq(frame.TunnelID, frame.RequestID, req)
 		return
 	}
 
-	t.handleNormalHTTPReq(frame.RequestID, req)
+	t.handleNormalHTTPReq(frame.TunnelID, frame.RequestID, req)
 }
 
-func (t *Tunnel) handleNormalHTTPReq(requestID uint64, req protocol.HTTPRequest) {
-	log.Printf("[client] proxying %s %s (body: %d bytes)", req.Method, req.Path, len(req.Body))
+func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HTTPRequest) {
+	localPort := t.portFor(tunnelID)
+	log.Printf("[client] proxying %s %s -> localhost:%d (body: %d bytes)", req.Method, req.Path, localPort, len(req.Body))
 
 	if t.debug {
 		log.Printf("[debug] request headers:")
@@ -292,7 +318,7 @@ func (t *Tunnel) handleNormalHTTPReq(requestID uint64, req protocol.HTTPRequest)
 		}
 	}
 
-	targetURL := fmt.Sprintf("http://localhost:%d%s", t.localPort, req.Path)
+	targetURL := fmt.Sprintf("http://localhost:%d%s", localPort, req.Path)
 	if t.debug {
 		log.Printf("[debug] forwarding to %s", targetURL)
 	}
@@ -300,7 +326,7 @@ func (t *Tunnel) handleNormalHTTPReq(requestID uint64, req protocol.HTTPRequest)
 	httpReq, err := http.NewRequest(req.Method, targetURL, bytes.NewReader(req.Body))
 	if err != nil {
 		log.Printf("[client] create local request error: %v", err)
-		t.sendHTTPError(requestID, 502, err.Error())
+		t.sendHTTPError(tunnelID, requestID, 502, err.Error())
 		return
 	}
 
@@ -312,12 +338,12 @@ func (t *Tunnel) handleNormalHTTPReq(requestID uint64, req protocol.HTTPRequest)
 			httpReq.Header.Add(k, v)
 		}
 	}
-	httpReq.Header.Set("Host", fmt.Sprintf("localhost:%d", t.localPort))
+	httpReq.Header.Set("Host", fmt.Sprintf("localhost:%d", localPort))
 
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		log.Printf("[client] local HTTP error: %v", err)
-		t.sendHTTPError(requestID, 502, err.Error())
+		t.sendHTTPError(tunnelID, requestID, 502, err.Error())
 		return
 	}
 	defer httpResp.Body.Close()
@@ -325,12 +351,12 @@ func (t *Tunnel) handleNormalHTTPReq(requestID uint64, req protocol.HTTPRequest)
 	body, err := io.ReadAll(io.LimitReader(httpResp.Body, protocol.MaxBodySize))
 	if err != nil {
 		log.Printf("[client] read response body error: %v", err)
-		t.sendHTTPError(requestID, 502, err.Error())
+		t.sendHTTPError(tunnelID, requestID, 502, err.Error())
 		return
 	}
 
 	statusCode := uint16(httpResp.StatusCode)
-	log.Printf("[client] local response: %d %s (%d body bytes)", statusCode, http.StatusText(int(statusCode)), len(body))
+	log.Printf("[client] localhost:%d response: %d %s (%d body bytes)", localPort, statusCode, http.StatusText(int(statusCode)), len(body))
 
 	if t.debug {
 		log.Printf("[debug] response headers:")
@@ -355,30 +381,31 @@ func (t *Tunnel) handleNormalHTTPReq(requestID uint64, req protocol.HTTPRequest)
 		}
 	}
 
-	t.writeResponse(requestID, protocol.HTTPResponse{
+	t.writeResponse(tunnelID, requestID, protocol.HTTPResponse{
 		StatusCode: statusCode,
 		Headers:    headers,
 		Body:       body,
 	})
 }
 
-func (t *Tunnel) handleWebSocketReq(requestID uint64, req protocol.HTTPRequest) {
-	log.Printf("[client] WebSocket upgrade: %s %s (%d bytes headers payload)", req.Method, req.Path, len(req.Headers))
+func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTTPRequest) {
+	localPort := t.portFor(tunnelID)
+	log.Printf("[client] WebSocket upgrade: %s %s -> localhost:%d (%d bytes headers payload)", req.Method, req.Path, localPort, len(req.Headers))
 
-	addr := fmt.Sprintf("localhost:%d", t.localPort)
+	addr := fmt.Sprintf("localhost:%d", localPort)
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
 		log.Printf("[client] WebSocket dial error: %v", err)
-		t.sendHTTPError(requestID, 502, fmt.Sprintf("dial localhost:%d: %v", t.localPort, err))
+		t.sendHTTPError(tunnelID, requestID, 502, fmt.Sprintf("dial localhost:%d: %v", localPort, err))
 		return
 	}
 
-	targetURL := fmt.Sprintf("http://localhost:%d%s", t.localPort, req.Path)
+	targetURL := fmt.Sprintf("http://localhost:%d%s", localPort, req.Path)
 	httpReq, err := http.NewRequest(req.Method, targetURL, bytes.NewReader(req.Body))
 	if err != nil {
 		log.Printf("[client] create WebSocket request error: %v", err)
 		conn.Close()
-		t.sendHTTPError(requestID, 502, err.Error())
+		t.sendHTTPError(tunnelID, requestID, 502, err.Error())
 		return
 	}
 
@@ -390,13 +417,13 @@ func (t *Tunnel) handleWebSocketReq(requestID uint64, req protocol.HTTPRequest) 
 			httpReq.Header.Add(k, v)
 		}
 	}
-	httpReq.Host = fmt.Sprintf("localhost:%d", t.localPort)
+	httpReq.Host = fmt.Sprintf("localhost:%d", localPort)
 
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
 	if err := httpReq.Write(conn); err != nil {
 		log.Printf("[client] WebSocket write request error: %v", err)
 		conn.Close()
-		t.sendHTTPError(requestID, 502, err.Error())
+		t.sendHTTPError(tunnelID, requestID, 502, err.Error())
 		return
 	}
 
@@ -406,7 +433,7 @@ func (t *Tunnel) handleWebSocketReq(requestID uint64, req protocol.HTTPRequest) 
 	if err != nil {
 		log.Printf("[client] WebSocket read response error: %v", err)
 		conn.Close()
-		t.sendHTTPError(requestID, 502, err.Error())
+		t.sendHTTPError(tunnelID, requestID, 502, err.Error())
 		return
 	}
 
@@ -422,7 +449,7 @@ func (t *Tunnel) handleWebSocketReq(requestID uint64, req protocol.HTTPRequest) 
 
 	log.Printf("[client] WebSocket response: %d %s", statusCode, http.StatusText(int(statusCode)))
 
-	t.writeResponse(requestID, protocol.HTTPResponse{
+	t.writeResponse(tunnelID, requestID, protocol.HTTPResponse{
 		StatusCode: statusCode,
 		Headers:    headers,
 		Body:       nil,
@@ -456,7 +483,7 @@ func (t *Tunnel) handleWebSocketReq(requestID uint64, req protocol.HTTPRequest) 
 		conn.Close()
 		t.writeFrame(protocol.Frame{
 			Type:      protocol.MsgStreamClose,
-			TunnelID:  t.tunnelID,
+			TunnelID:  tunnelID,
 			RequestID: requestID,
 		})
 		if t.debug {
@@ -472,7 +499,7 @@ func (t *Tunnel) handleWebSocketReq(requestID uint64, req protocol.HTTPRequest) 
 		}
 		if err := t.writeFrame(protocol.Frame{
 			Type:      protocol.MsgStreamData,
-			TunnelID:  t.tunnelID,
+			TunnelID:  tunnelID,
 			RequestID: requestID,
 			Payload:   append([]byte{}, buf[:n]...),
 		}); err != nil {
@@ -481,11 +508,11 @@ func (t *Tunnel) handleWebSocketReq(requestID uint64, req protocol.HTTPRequest) 
 	}
 }
 
-func (t *Tunnel) writeResponse(requestID uint64, resp protocol.HTTPResponse) {
+func (t *Tunnel) writeResponse(tunnelID, requestID uint64, resp protocol.HTTPResponse) {
 	respPayload := protocol.EncodeHTTPResponse(resp)
 	t.writeFrame(protocol.Frame{
 		Type:      protocol.MsgHTTPRes,
-		TunnelID:  t.tunnelID,
+		TunnelID:  tunnelID,
 		RequestID: requestID,
 		Payload:   respPayload,
 	})
@@ -499,8 +526,8 @@ func (t *Tunnel) writeFrame(frame protocol.Frame) error {
 	return t.conn.WriteMessage(websocket.BinaryMessage, data)
 }
 
-func (t *Tunnel) sendHTTPError(requestID uint64, statusCode uint16, msg string) {
-	t.writeResponse(requestID, protocol.HTTPResponse{
+func (t *Tunnel) sendHTTPError(tunnelID, requestID uint64, statusCode uint16, msg string) {
+	t.writeResponse(tunnelID, requestID, protocol.HTTPResponse{
 		StatusCode: statusCode,
 		Headers:    map[string][]string{"Content-Type": {"text/plain"}},
 		Body:       []byte(msg),

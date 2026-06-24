@@ -39,7 +39,7 @@ You run a web server on `localhost:3000`. No public IP, behind NAT. VLGR exposes
                                                  └───────────────────┘
 ```
 
-The client opens a persistent WebSocket to the server. The server assigns a unique public URL (e.g., `a3f8b2c1.tunnel.domain.com`). When an external user hits that URL, the server serializes the HTTP request into a binary frame, sends it to the client over WebSocket. The client forwards it to `localhost:3000`, serializes the response, and sends it back. The server returns the response to the external user — who sees a normal HTTP exchange.
+The client opens a persistent WebSocket to the server. The server assigns a unique public URL for each port (e.g., `a3f8b2c1.tunnel.domain.com`). A single client connection can expose multiple local ports — each gets its own subdomain and TunnelID. When an external user hits a public URL, the server serializes the HTTP request into a binary frame (tagged with the corresponding TunnelID), sends it to the client over WebSocket. The client looks up the local port by TunnelID, forwards the request to the correct `localhost:<port>`, serializes the response, and sends it back. The server returns the response to the external user — who sees a normal HTTP exchange.
 
 ---
 
@@ -107,13 +107,15 @@ Every message is wrapped in a fixed binary frame:
 | `0x01` | `MsgAuth` | Client → Server | Authentication token |
 | `0x02` | `MsgAuthOK` | Server → Client | Auth success |
 | `0x03` | `MsgAuthErr` | Server → Client | Auth error |
-| `0x04` | `MsgRegister` | Client → Server | Register tunnel (port + optional subdomain) |
+| `0x04` | `MsgRegister` | Client → Server | Register tunnel (port + optional subdomain). Multiple registrations per connection allowed — each creates an independent tunnel |
 | `0x05` | `MsgRegisterOK` | Server → Client | Tunnel created (public URL + tunnelID) |
 | `0x06` | `MsgRegisterErr` | Server → Client | Registration error |
-| `0x07` | `MsgHTTPReq` | Server → Client | Proxied HTTP request |
+| `0x07` | `MsgHTTPReq` | Server → Client | Proxied HTTP request (routed by TunnelID) |
 | `0x08` | `MsgHTTPRes` | Client → Server | HTTP response from local server |
 | `0x09` | `MsgCloseTunnel` | Both | Close tunnel request |
 | `0x0A` | `MsgError` | Both | Error message |
+| `0x0B` | `MsgStreamData` | Both | WebSocket stream data chunk |
+| `0x0C` | `MsgStreamClose` | Both | WebSocket stream close |
 
 ### HTTP request payload (`MsgHTTPReq`)
 
@@ -215,22 +217,16 @@ host = "abc123.tunnel.domain.com", baseDomain = "tunnel.domain.com"
 **Connect():**
 1. Dial WebSocket (`ws://` or `wss://` depending on `-tls` flag).
 2. Send `MsgAuth` with token.
-3. Send `MsgRegister` with local port and optional subdomain.
-4. Parse public URL and tunnelID from response.
+3. For each port in the comma-separated `-local` list, send `MsgRegister` with port and optional subdomain (matched by position in `-subdomain`).
+4. Parse public URLs and tunnelIDs from responses. Store `tunnelID → port` mapping for routing.
 
 **Run():**
 - Reads messages in a loop.
-- `MsgHTTPReq` → spawns `handleHTTPReq` goroutine (concurrent handling).
+- `MsgHTTPReq` → spawns `handleHTTPReq` goroutine (concurrent handling), routes to correct `localhost:<port>` by `frame.TunnelID`.
 - `MsgCloseTunnel` → exits loop.
 
-**handleHTTPReq():**
-1. Deserialize HTTP request from payload.
-2. Build `http.Request` targeting `http://localhost:<port><path>`.
-3. Execute request via `http.Client` (30s timeout).
-4. Read response body (32MB limit).
-5. Serialize response, send `MsgHTTPRes` back.
-
-**Error handling:** Returns HTTP 502 to the server on failure.
+**Multi-tunnel routing:**
+When the client registers multiple ports, the server assigns a unique `TunnelID` to each. Incoming `MsgHTTPReq` frames carry the target `TunnelID`. The client looks up the corresponding local port via `mappings[TunnelID]` and forwards the request to the correct `localhost:<port>`.
 
 ### 2. Client entry point (`cmd/client/main.go`)
 
@@ -319,10 +315,11 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 | Flag | Default | Description |
 |---|---|---|
 | `-server` | `localhost:4443` | VLGR server address |
-| `-local` | **required** | Local port to expose |
+| `-local` | **required** | Local port(s) to expose, comma-separated (e.g. `3000` or `8080,3000`) |
 | `-token` | `vlgr-token` | Authentication token |
-| `-subdomain` | auto | Request specific subdomain |
+| `-subdomain` | auto | Request custom subdomain(s), comma-separated — order matches `-local` |
 | `-tls` | `false` | Use WSS (TLS) — required when connecting via Caddy/HTTPS |
+| `-debug` | `false` | Enable verbose debug logging |
 
 ---
 
@@ -357,8 +354,11 @@ sudo ./scripts/deploy-server.sh -d tunnel.example.com -t my-token \
 # Server (VPS)
 ./vlgr-server -addr 127.0.0.1:4443 -http 127.0.0.1:8080 -domain tunnel.domain.com
 
-# Client (your machine)
+# Client (your machine) — single tunnel
 ./vlgr-client -server tunnel.domain.com:443 -local 3000 -tls
+
+# Client — multiple tunnels
+./vlgr-client -server tunnel.domain.com:443 -local "8080,3000,5000" -subdomain "api,web,admin" -tls
 ```
 
 ---

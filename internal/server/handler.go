@@ -35,7 +35,7 @@ type pendingReq struct {
 type ClientHandler struct {
 	conn          *websocket.Conn
 	registry      *Registry
-	tunnel        *Tunnel
+	tunnels       map[uint64]*Tunnel
 	baseDomain    string
 	expectedToken string
 	authenticated bool
@@ -52,6 +52,7 @@ func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain strin
 	return &ClientHandler{
 		conn:          conn,
 		registry:      registry,
+		tunnels:       make(map[uint64]*Tunnel),
 		baseDomain:    baseDomain,
 		expectedToken: expectedToken,
 		debug:         debug,
@@ -175,7 +176,7 @@ func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 		return
 	}
 
-	h.tunnel = tunnel
+	h.tunnels[tunnel.ID] = tunnel
 
 	publicURL := fmt.Sprintf("%s.%s", requestedSubdomain, h.baseDomain)
 	respPayload := append([]byte{byte(len(publicURL))}, []byte(publicURL)...)
@@ -251,7 +252,7 @@ func (h *ClientHandler) handleStreamClose(frame protocol.Frame) {
 	close(pr.streamData)
 }
 
-func (h *ClientHandler) ForwardHTTP(req protocol.HTTPRequest, streamData chan []byte) (requestID uint64, resp protocol.HTTPResponse, cleanup func(), err error) {
+func (h *ClientHandler) ForwardHTTP(tunnelID uint64, req protocol.HTTPRequest, streamData chan []byte) (requestID uint64, resp protocol.HTTPResponse, cleanup func(), err error) {
 	requestID = nextRequestID()
 
 	if h.debug {
@@ -270,10 +271,6 @@ func (h *ClientHandler) ForwardHTTP(req protocol.HTTPRequest, streamData chan []
 	h.mu.Unlock()
 
 	payload := protocol.EncodeHTTPRequest(req)
-	tunnelID := uint64(0)
-	if h.tunnel != nil {
-		tunnelID = h.tunnel.ID
-	}
 
 	if h.debug {
 		log.Printf("[debug] forward payload #%d: %d bytes", requestID, len(payload))
@@ -348,9 +345,9 @@ func (h *ClientHandler) writeError(requestID uint64, msg string) {
 }
 
 func (h *ClientHandler) cleanup() {
-	if h.tunnel != nil {
-		h.registry.Unregister(h.tunnel.Subdomain)
-		log.Printf("[handler] tunnel %s unregistered", h.tunnel.Subdomain)
+	for _, tunnel := range h.tunnels {
+		h.registry.Unregister(tunnel.Subdomain)
+		log.Printf("[handler] tunnel %s unregistered", tunnel.Subdomain)
 	}
 	close(h.done)
 	h.conn.Close()

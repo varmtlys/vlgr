@@ -77,6 +77,9 @@ After the script finishes, the server is running and ready for clients:
 
 ```bash
 ./vlgr-client -server tunnel.example.com:443 -local 3000 -tls -token <token>
+
+# Multiple tunnels (ports match subdomains by position):
+./vlgr-client -server tunnel.example.com:443 -local "8080,3000,5000" -subdomain "api,web,admin" -tls -token <token>
 ```
 
 > The auto-deploy script automates Steps 1–6 below. For a manual setup or to understand each component, follow the detailed guide.
@@ -331,14 +334,26 @@ Run it:
     -tls
 ```
 
-Expected output:
+Expected output (single tunnel):
 
 ```
 [client] authenticated
 [client] tunnel ready: a3f8b2c1.tunnel.domain.com -> localhost:3000
 ========================================
-  Tunnel: a3f8b2c1.tunnel.domain.com
-  Local:  http://localhost:3000
+  Tunnels: a3f8b2c1.tunnel.domain.com
+  Local:   3000
+========================================
+```
+
+Expected output (multiple tunnels):
+
+```
+[client] authenticated
+[client] tunnel ready: api.tunnel.domain.com -> localhost:8080
+[client] tunnel ready: web.tunnel.domain.com -> localhost:3000
+========================================
+  Tunnels: api.tunnel.domain.com, web.tunnel.domain.com
+  Local:   8080,3000
 ========================================
 ```
 
