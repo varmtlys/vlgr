@@ -20,13 +20,14 @@
 #   --caddy         Install/configure Caddy with Cloudflare DNS plugin
 #   --cf-token <t>  Cloudflare API token (requires --caddy)
 #   --no-service    Skip systemd service creation
-#   --no-build      Skip Go build (use pre-built binary from build/linux/)
-#   --ref <ref>     Git ref to checkout (default: main). RECOMMENDED: pin a tag like v1.0
+#   --no-build      Skip Go build, always build from local source
+#   --release <v>   Download pre-built binary from GitHub release (e.g. "latest" or "v1.0")
+#   --ref <ref>     Git ref to checkout when building from source (default: main)
 #   --src-sha256 <h> Verify the cloned source tree matches this sha256 (optional, strong)
 #   --help          Show this help
 #
-# Environment variables:
-#   CF_API_TOKEN    Cloudflare API token (for Caddy DNS-01)
+# By default the script tries to download the latest GitHub release binary.
+# If no release exists or download fails, it builds from source.
 
 set -euo pipefail
 
@@ -41,9 +42,11 @@ CF_TOKEN=""
 NO_SERVICE=false
 NO_BUILD=false
 UNINSTALL=false
+VLGR_RELEASE=""
 GIT_REF="main"
 SRC_SHA256=""
 REPO_URL="https://github.com/varmtlys/vlgr.git"
+RELEASES_URL="https://github.com/varmtlys/vlgr/releases"
 
 # ─── Parse args ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -58,6 +61,7 @@ while [[ $# -gt 0 ]]; do
     --cf-token) CF_TOKEN="$2"; shift 2 ;;
     --no-service) NO_SERVICE=true; shift ;;
     --no-build) NO_BUILD=true; shift ;;
+    --release) VLGR_RELEASE="$2"; shift 2 ;;
     --ref) GIT_REF="$2"; shift 2 ;;
     --src-sha256) SRC_SHA256="$2"; shift 2 ;;
     --help) sed -n '/^# Usage:/,/^$/p' "$0"; exit 0 ;;
@@ -207,6 +211,52 @@ ensure_go() {
   fi
 }
 
+# ─── Detect architecture ──────────────────────────────────────────────────────
+detect_arch() {
+  local arch
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64)  echo "amd64" ;;
+    aarch64|arm64) echo "arm64" ;;
+    *)             echo "amd64" ;; # fallback
+  esac
+}
+
+# ─── Download pre-built binary ────────────────────────────────────────────────
+download_binary() {
+  local version="$1"
+  local arch
+  arch="$(detect_arch)"
+  local binary_name="vlgr-server-linux-${arch}"
+  local download_url
+
+  if [[ "$version" == "latest" || -z "$version" ]]; then
+    download_url="${RELEASES_URL}/latest/download/${binary_name}"
+  else
+    download_url="${RELEASES_URL}/download/${version}/${binary_name}"
+  fi
+
+  log "Trying to download pre-built binary from ${download_url} ..."
+  mkdir -p "${INSTALL_PATH}/bin"
+
+  if has_cmd curl; then
+    if curl -fsSL -o "${INSTALL_PATH}/bin/vlgr-server" "${download_url}" 2>/dev/null; then
+      chmod 755 "${INSTALL_PATH}/bin/vlgr-server"
+      log "Downloaded pre-built binary: $(du -h "${INSTALL_PATH}/bin/vlgr-server" | cut -f1)"
+      return 0
+    fi
+  elif has_cmd wget; then
+    if wget -q -O "${INSTALL_PATH}/bin/vlgr-server" "${download_url}" 2>/dev/null; then
+      chmod 755 "${INSTALL_PATH}/bin/vlgr-server"
+      log "Downloaded pre-built binary: $(du -h "${INSTALL_PATH}/bin/vlgr-server" | cut -f1)"
+      return 0
+    fi
+  fi
+
+  warn "Pre-built binary not available at ${download_url}, will build from source"
+  return 1
+}
+
 # ─── Build VLGR server ───────────────────────────────────────────────────────
 build_server() {
   local build_dir
@@ -295,22 +345,29 @@ ensure_user() {
 
 # ─── Install binary ───────────────────────────────────────────────────────────
 install_binary() {
-  if $NO_BUILD; then
-    local script_dir
-    script_dir="$(dirname "$(dirname "$(readlink -f "$0")")")"
-    local prebuilt="${script_dir}/build/linux/vlgr-server"
-
-    if [[ -f "$prebuilt" ]]; then
-      log "Using pre-built binary: $prebuilt"
-      mkdir -p "${INSTALL_PATH}/bin"
-      cp "$prebuilt" "${INSTALL_PATH}/bin/vlgr-server"
-    else
-      err "Pre-built binary not found at $prebuilt. Build it first: ./scripts/build.sh --linux-only"
-      exit 1
-    fi
+  # If binary already obtained (downloaded or built), just verify and chmod.
+  if [[ -f "${INSTALL_PATH}/bin/vlgr-server" ]]; then
+    chmod 755 "${INSTALL_PATH}/bin/vlgr-server"
+    log "Binary ready: ${INSTALL_PATH}/bin/vlgr-server ($(du -h "${INSTALL_PATH}/bin/vlgr-server" | cut -f1))"
+    return
   fi
 
-  chmod 755 "${INSTALL_PATH}/bin/vlgr-server"
+  # --no-build: use pre-built binary from local build/ directory.
+  local arch
+  arch="$(detect_arch)"
+  local script_dir
+  script_dir="$(dirname "$(dirname "$(readlink -f "$0")")")"
+  local prebuilt="${script_dir}/build/vlgr-server-linux-${arch}"
+
+  if [[ -f "$prebuilt" ]]; then
+    log "Using pre-built binary: $prebuilt"
+    mkdir -p "${INSTALL_PATH}/bin"
+    cp "$prebuilt" "${INSTALL_PATH}/bin/vlgr-server"
+    chmod 755 "${INSTALL_PATH}/bin/vlgr-server"
+  else
+    err "Pre-built binary not found at $prebuilt. Build it first: GOOS=linux GOARCH=${arch} go build -trimpath -ldflags='-s -w' -o build/vlgr-server-linux-${arch} ./cmd/server"
+    exit 1
+  fi
 }
 
 # ─── Setup directories ────────────────────────────────────────────────────────
@@ -563,20 +620,19 @@ main() {
   log "Phase 1/5: Installing dependencies..."
   local pkgs=()
   if is_ubuntu || is_debian; then
-    pkgs+=(git curl wget)
+    pkgs+=(curl git wget)
   elif is_rhel; then
-    pkgs+=(git curl wget)
+    pkgs+=(curl git wget)
   elif is_arch; then
-    pkgs+=(git curl wget)
+    pkgs+=(curl git wget)
   elif is_alpine; then
-    pkgs+=(git curl wget)
+    pkgs+=(curl git wget)
   elif is_suse; then
-    pkgs+=(git curl wget)
+    pkgs+=(curl git wget)
   elif is_void; then
-    pkgs+=(git curl wget)
+    pkgs+=(curl git wget)
   fi
   install_packages "${pkgs[@]}"
-  ensure_go
 
   # Phase 2: System user
   log "Phase 2/5: Creating system user..."
@@ -586,11 +642,19 @@ main() {
   log "Phase 3/5: Setting up directories..."
   setup_dirs
 
-  # Phase 4: Build & install
-  log "Phase 4/5: Building and installing server..."
+  # Phase 4: Obtain binary (download or build)
+  log "Phase 4/5: Obtaining server binary..."
+  local binary_obtained=false
+
   if $NO_BUILD; then
-    install_binary
-  else
+    log "Forcing local build (--no-build)..."
+  elif download_binary "${VLGR_RELEASE:-latest}"; then
+    binary_obtained=true
+  fi
+
+  if ! $binary_obtained; then
+    log "Building from source..."
+    ensure_go
     build_server
   fi
   install_binary

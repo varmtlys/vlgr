@@ -279,14 +279,24 @@ curl -H "Host: <hex-from-output>.localhost:8080" http://localhost:8080/
 ### Building binaries
 
 ```bash
-# Linux
-./scripts/build.sh --linux-only
+# Pre-built binaries are available on GitHub Releases:
+# https://github.com/varmtlys/vlgr/releases
 
-# Windows (PowerShell)
-.\scripts\build.ps1 -WindowsOnly
+# Or build locally for your platform:
+# Linux (amd64 / arm64):
+GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o build/vlgr-server-linux-amd64 ./cmd/server
+GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o build/vlgr-client-linux-amd64 ./cmd/client
+
+# Windows (amd64):
+GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o build/vlgr-server-windows-amd64.exe ./cmd/server
+GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o build/vlgr-client-windows-amd64.exe ./cmd/client
+
+# macOS (amd64 / arm64):
+GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o build/vlgr-server-darwin-amd64 ./cmd/server
+GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o build/vlgr-client-darwin-arm64 ./cmd/client
 ```
 
-Output in `build/linux/` and `build/windows/`.
+Output in `build/` as flat files: `vlgr-server-<os>-<arch>`.
 
 ---
 
@@ -350,16 +360,16 @@ See [GETTING_STARTED.md](GETTING_STARTED.md) for the full production guide cover
 
 ### Auto-deploy (one command)
 
-The [`scripts/deploy-server.sh`](scripts/deploy-server.sh) script automates the entire VPS setup — installs Go, builds the server, creates a systemd service, and optionally installs Caddy with Cloudflare DNS plugin. Supports Debian/Ubuntu, RHEL/Fedora, Arch, Alpine, openSUSE, and Void.
+The [`scripts/deploy-server.sh`](scripts/deploy-server.sh) script automates the entire VPS setup — downloads a pre-built binary (or builds from source as fallback), creates a systemd service, and optionally installs Caddy with Cloudflare DNS plugin. Supports Debian/Ubuntu, RHEL/Fedora, Arch, Alpine, openSUSE, and Void.
 
 ```bash
-# From the web (as root):
+# From the web (as root) — downloads latest pre-built binary:
 curl -sL https://github.com/varmtlys/vlgr/raw/main/scripts/deploy-server.sh | sudo bash -s -- \
-  -d tunnel.domain.com -t my-token
+  -d tunnel.domain.com -t my-token --release latest
 
 # Or locally with Caddy + Cloudflare:
 sudo ./scripts/deploy-server.sh -d tunnel.domain.com -t my-token \
-  --caddy --cf-token <CF_API_TOKEN>
+  --release latest --caddy --cf-token <CF_API_TOKEN>
 ```
 
 ### Quick production commands

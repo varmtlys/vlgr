@@ -32,19 +32,19 @@ VLGR binds only to `127.0.0.1`. All TLS termination and routing is handled by Ca
 
 ## Quick Deploy (Auto)
 
-The [`deploy-server.sh`](scripts/deploy-server.sh) script automates the entire VPS setup — installs Go, builds the server, creates a systemd service, and optionally installs Caddy with Cloudflare DNS plugin.
+The [`deploy-server.sh`](scripts/deploy-server.sh) script automates the entire VPS setup — downloads a pre-built binary (or builds from source as fallback), creates a systemd service, and optionally installs Caddy with Cloudflare DNS plugin.
 
 ### One-liner (requires root)
 
 ```bash
 curl -sL https://github.com/varmtlys/vlgr/raw/main/scripts/deploy-server.sh | sudo bash -s -- \
-  -d tunnel.domain.com -t mysecret
+  -d tunnel.domain.com -t mysecret --release latest
 ```
 
 ### Locally
 
 ```bash
-sudo ./scripts/deploy-server.sh -d tunnel.domain.com -t mysecret --caddy --cf-token <CF_API_TOKEN>
+sudo ./scripts/deploy-server.sh -d tunnel.domain.com -t mysecret --release latest --caddy --cf-token <CF_API_TOKEN>
 ```
 
 ### Options
@@ -59,23 +59,29 @@ sudo ./scripts/deploy-server.sh -d tunnel.domain.com -t mysecret --caddy --cf-to
 | `--caddy` | Install & configure Caddy with Cloudflare DNS plugin |
 | `--cf-token <t>` | Cloudflare API token (requires `--caddy`) |
 | `--no-service` | Skip systemd service creation |
-| `--no-build` | Skip Go build (use pre-built `build/linux/vlgr-server`) |
+| `--no-build` | Force source build (skip release download) |
+| `--release <v>` | Download from GitHub release: `latest` (default) or `v1.0` |
+| `--ref <ref>` | Git ref for source build (default: `main`) |
 | `-u, --uninstall` | Remove VLGR server, service, binary and config |
 
 ### What it does
 
 1. Detects your Linux distro (Debian, Ubuntu, RHEL, Arch, Alpine, openSUSE, Void)
-2. Installs dependencies (git, curl, wget) and Go 1.22+
-3. Creates a dedicated system user (default: `nobody`)
-4. Sets up directories (`/opt/vlgr/bin`, `/opt/vlgr/logs`, `/etc/vlgr`)
-5. Clones the repo and builds `vlgr-server` with `-s -w` trimmed binary
-6. Writes config to `/etc/vlgr/vlgr-server.conf`
-7. Creates and enables a systemd service (`vlgr-server`)
-8. Optionally installs Caddy, adds Cloudflare DNS plugin, appends reverse-proxy config
+2. Installs dependencies (curl, wget, git)
+3. Downloads the latest pre-built `vlgr-server` binary from GitHub Releases
+4. Falls back to installing Go 1.22+ and building from source if no release binary found
+5. Creates a dedicated system user (default: `nobody`)
+6. Sets up directories (`/opt/vlgr/bin`, `/opt/vlgr/logs`, `/etc/vlgr`)
+7. Writes config to `/etc/vlgr/vlgr-server.conf`
+8. Creates and enables a systemd service (`vlgr-server`)
+9. Optionally installs Caddy, adds Cloudflare DNS plugin, appends reverse-proxy config
 
-After the script finishes, the server is running and ready for clients:
+After the script finishes, the server is running and ready for clients.
+
+Grab the pre-built client binary for your platform from [GitHub Releases](https://github.com/varmtlys/vlgr/releases) or build it locally:
 
 ```bash
+# Build client: GOOS=<os> GOARCH=<arch> go build -trimpath -ldflags="-s -w" -o build/vlgr-client-<os>-<arch> ./cmd/client
 ./vlgr-client -server tunnel.domain.com:443 -local 3000 -tls -token <token>
 
 # Multiple tunnels (ports match subdomains by position):
@@ -249,19 +255,28 @@ curl https://tunnel.domain.com/_tunnel
 
 ## Step 6: Deploy VLGR Server
 
-### Build
+### Download pre-built binary (recommended)
+
+```bash
+curl -fsSL -o vlgr-server https://github.com/varmtlys/vlgr/releases/latest/download/vlgr-server-linux-amd64
+chmod +x vlgr-server
+```
+
+Or use the deploy script with `--release latest` (see Quick Deploy above).
+
+### Build from source (fallback)
 
 ```bash
 cd vlgr
 git pull
 go mod tidy
-./scripts/build.sh --linux-only
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o build/vlgr-server-linux-amd64 ./cmd/server
 ```
 
 ### Manual launch (test first)
 
 ```bash
-./build/linux/vlgr-server \
+./build/vlgr-server-linux-amd64 \
     -addr 127.0.0.1:4443 \
     -http 127.0.0.1:8080 \
     -domain tunnel.domain.com
@@ -332,7 +347,7 @@ Deploy:
 
 ```bash
 sudo mkdir -p /opt/vlgr
-sudo cp build/linux/vlgr-server /opt/vlgr/
+sudo cp build/vlgr-server-linux-amd64 /opt/vlgr/vlgr-server
 sudo systemctl daemon-reload
 sudo systemctl enable vlgr-server
 sudo systemctl start vlgr-server
@@ -343,17 +358,21 @@ sudo systemctl status vlgr-server
 
 ## Step 7: Connect the Client
 
-Build the client on your home machine:
+Download the pre-built client binary or build it:
 
 ```bash
-cd vlgr
-./scripts/build.sh --linux-only
+# Download pre-built:
+curl -fsSL -o vlgr-client https://github.com/varmtlys/vlgr/releases/latest/download/vlgr-client-linux-amd64
+chmod +x vlgr-client
+
+# Or build:
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o build/vlgr-client-linux-amd64 ./cmd/client
 ```
 
 Run it:
 
 ```bash
-./build/linux/vlgr-client \
+./build/vlgr-client-linux-amd64 \
     -server tunnel.domain.com:443 \
     -local 3000 \
     -tls
