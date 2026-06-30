@@ -1,0 +1,312 @@
+package client
+
+import (
+	"encoding/binary"
+	"net/http"
+	"testing"
+
+	"vlgr/internal/protocol"
+)
+
+func TestNewTunnel(t *testing.T) {
+	tun := NewTunnel("example.com:4443", "token123", []uint16{3000}, nil, true)
+	if tun.serverAddr != "example.com:4443" {
+		t.Errorf("serverAddr: want example.com:4443, got %q", tun.serverAddr)
+	}
+	if tun.token != "token123" {
+		t.Errorf("token: want token123, got %q", tun.token)
+	}
+	if tun.useTLS != true {
+		t.Error("useTLS should be true")
+	}
+	if len(tun.ports) != 1 || tun.ports[0] != 3000 {
+		t.Errorf("ports: want [3000], got %v", tun.ports)
+	}
+	if tun.PublicURL() != "" {
+		t.Errorf("PublicURL should be empty initially, got %q", tun.PublicURL())
+	}
+}
+
+func TestTunnel_SetDebug(t *testing.T) {
+	tun := NewTunnel("x", "", nil, nil, false)
+	if tun.debug {
+		t.Error("debug should be false by default")
+	}
+	tun.SetDebug(true)
+	if !tun.debug {
+		t.Error("debug should be true after SetDebug(true)")
+	}
+	tun.SetDebug(false)
+	if tun.debug {
+		t.Error("debug should be false after SetDebug(false)")
+	}
+}
+
+func TestPortFor_Found(t *testing.T) {
+	tun := NewTunnel("x", "", nil, nil, false)
+	tun.mappings[42] = 3000
+	port, ok := tun.portFor(42)
+	if !ok {
+		t.Error("portFor should return true for known ID")
+	}
+	if port != 3000 {
+		t.Errorf("port: want 3000, got %d", port)
+	}
+}
+
+func TestPortFor_NotFound(t *testing.T) {
+	tun := NewTunnel("x", "", nil, nil, false)
+	_, ok := tun.portFor(999)
+	if ok {
+		t.Error("portFor should return false for unknown ID")
+	}
+}
+
+func TestSendHTTPError_NoConnection(t *testing.T) {
+	tun := NewTunnel("x", "", nil, nil, false)
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic when writing without connection")
+		}
+	}()
+	tun.sendHTTPError(1, 100, 502, "test error")
+}
+
+func TestWriteResponse_NoConnection(t *testing.T) {
+	tun := NewTunnel("x", "", nil, nil, false)
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic when writing without connection")
+		}
+	}()
+	resp := protocol.HTTPResponse{
+		StatusCode: 200,
+		Headers:    map[string][]string{"X-Test": {"value"}},
+		Body:       []byte("ok"),
+	}
+	tun.writeResponse(1, 100, resp)
+}
+
+func TestHandleStreamData_NoRelay(t *testing.T) {
+	tun := NewTunnel("x", "", nil, nil, false)
+	tun.handleStreamData(protocol.Frame{RequestID: 999, Payload: []byte("data")})
+}
+
+func TestHandleStreamClose_NoRelay(t *testing.T) {
+	tun := NewTunnel("x", "", nil, nil, false)
+	tun.handleStreamClose(protocol.Frame{RequestID: 999})
+}
+
+func TestHandleHTTPReq_DecodeError(t *testing.T) {
+	tun := NewTunnel("x", "", nil, nil, false)
+	tun.mappings[1] = 3000
+	done := make(chan struct{})
+	go func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("expected panic when writing without connection")
+			}
+			close(done)
+		}()
+		tun.handleHTTPReq(protocol.Frame{
+			TunnelID:  1,
+			RequestID: 1,
+			Payload:   []byte{0x00, 0x01},
+		})
+	}()
+	<-done
+}
+
+func TestHTTPClient_Configuration(t *testing.T) {
+	if httpClient.Timeout == 0 {
+		t.Error("httpClient should have a timeout")
+	}
+}
+
+func TestConnect_InvalidServer(t *testing.T) {
+	tun := NewTunnel("255.255.255.255:9999", "token", []uint16{3000}, nil, false)
+	err := tun.Connect()
+	if err == nil {
+		t.Error("expected error connecting to invalid server")
+	}
+}
+
+func TestTunnel_Close(t *testing.T) {
+	tun := NewTunnel("x", "", nil, nil, false)
+	closed := make(chan struct{})
+	go func() {
+		<-tun.done
+		close(closed)
+	}()
+	tun.Close()
+	<-closed
+}
+
+func TestHandleNormalHTTPReq_UnknownTunnel(t *testing.T) {
+	tun := NewTunnel("x", "", nil, nil, false)
+	req := protocol.HTTPRequest{
+		Method:  "GET",
+		Path:    "/",
+		Headers: map[string][]string{},
+	}
+	done := make(chan struct{})
+	go func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("expected panic when writing without connection")
+			}
+			close(done)
+		}()
+		tun.handleNormalHTTPReq(999, 1, req)
+	}()
+	<-done
+}
+
+func TestHandleWebSocketReq_UnknownTunnel(t *testing.T) {
+	tun := NewTunnel("x", "", nil, nil, false)
+	req := protocol.HTTPRequest{
+		Method:  "GET",
+		Path:    "/ws",
+		Headers: map[string][]string{},
+	}
+	done := make(chan struct{})
+	go func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("expected panic when writing without connection")
+			}
+			close(done)
+		}()
+		tun.handleWebSocketReq(999, 1, req)
+	}()
+	<-done
+}
+
+func TestHandleWebSocketReq_DialError(t *testing.T) {
+	tun := NewTunnel("x", "", nil, nil, false)
+	tun.mappings[1] = 65535
+	req := protocol.HTTPRequest{
+		Method:  "GET",
+		Path:    "/ws",
+		Headers: map[string][]string{},
+	}
+	done := make(chan struct{})
+	go func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("expected panic when writing without connection")
+			}
+			close(done)
+		}()
+		tun.handleWebSocketReq(1, 1, req)
+	}()
+	<-done
+}
+
+func TestHTTPRequest_HeaderFiltering(t *testing.T) {
+	tun := NewTunnel("x", "", nil, nil, false)
+	tun.mappings[1] = 3000
+
+	req := protocol.HTTPRequest{
+		Method: "POST",
+		Path:   "/api",
+		Headers: map[string][]string{
+			"Content-Length":   {"100"},
+			"Transfer-Encoding": {"chunked"},
+			"X-Custom":         {"test"},
+		},
+		Body: []byte("data"),
+	}
+
+	httpReq, err := http.NewRequest(req.Method, "http://localhost:3000/api", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	for k, values := range req.Headers {
+		if k == "Content-Length" || k == "Transfer-Encoding" {
+			continue
+		}
+		for _, v := range values {
+			httpReq.Header.Add(k, v)
+		}
+	}
+
+	if httpReq.Header.Get("Content-Length") != "" {
+		t.Error("Content-Length should be filtered out")
+	}
+	if httpReq.Header.Get("Transfer-Encoding") != "" {
+		t.Error("Transfer-Encoding should be filtered out")
+	}
+	if httpReq.Header.Get("X-Custom") != "test" {
+		t.Error("X-Custom should be present")
+	}
+}
+
+func TestWriteFrame_NoConnection(t *testing.T) {
+	tun := NewTunnel("x", "", nil, nil, false)
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic when writing without connection")
+		}
+	}()
+	tun.writeFrame(protocol.Frame{
+		Type:      protocol.MsgCloseTunnel,
+		TunnelID:  0,
+		RequestID: 0,
+	})
+}
+
+func TestEncodeDecodeHTTPResponse_Client(t *testing.T) {
+	original := protocol.HTTPResponse{
+		StatusCode: 200,
+		Headers:    map[string][]string{"Content-Type": {"application/json"}},
+		Body:       []byte(`{"ok":true}`),
+	}
+	encoded := protocol.EncodeHTTPResponse(original)
+	decoded, err := protocol.DecodeHTTPResponse(encoded)
+	if err != nil {
+		t.Fatalf("DecodeHTTPResponse: %v", err)
+	}
+	if decoded.StatusCode != 200 {
+		t.Errorf("StatusCode: want 200, got %d", decoded.StatusCode)
+	}
+	if string(decoded.Body) != `{"ok":true}` {
+		t.Errorf("Body: want %q, got %q", `{"ok":true}`, decoded.Body)
+	}
+}
+
+func TestIsWebSocketUpgradeReq_Client(t *testing.T) {
+	req := protocol.HTTPRequest{
+		Headers: map[string][]string{"Upgrade": {"websocket"}},
+	}
+	if !protocol.IsWebSocketUpgradeReq(req) {
+		t.Error("should detect WebSocket upgrade")
+	}
+
+	req2 := protocol.HTTPRequest{
+		Headers: map[string][]string{"Host": {"example.com"}},
+	}
+	if protocol.IsWebSocketUpgradeReq(req2) {
+		t.Error("should not detect WebSocket upgrade")
+	}
+}
+
+func TestRegisterPayload_Encoding(t *testing.T) {
+	port := uint16(8080)
+	subdomain := "myapp"
+
+	regPayload := make([]byte, 2)
+	binary.BigEndian.PutUint16(regPayload, port)
+	regPayload = append(regPayload, byte(len(subdomain)))
+	regPayload = append(regPayload, []byte(subdomain)...)
+
+	if len(regPayload) != 2+1+len(subdomain) {
+		t.Errorf("payload length: want %d, got %d", 2+1+len(subdomain), len(regPayload))
+	}
+	if regPayload[2] != byte(len(subdomain)) {
+		t.Errorf("subdomain length byte: want %d, got %d", len(subdomain), regPayload[2])
+	}
+	if string(regPayload[3:]) != subdomain {
+		t.Errorf("subdomain: want %q, got %q", subdomain, regPayload[3:])
+	}
+}
