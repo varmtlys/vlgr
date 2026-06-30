@@ -21,9 +21,6 @@ $buildDir = Join-Path $projectRoot "build"
 
 $ldflags = "-s -w"   # strip debug info, shrink binary
 
-# Timestamp for build info
-$buildTime = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
-
 $allTargets = @(
     @{OS="windows"; GoArch="amd64"; Label="amd64"; Ext=".exe"},
     @{OS="windows"; GoArch="386";   Label="x86";   Ext=".exe"},
@@ -41,7 +38,6 @@ $apps = @(
 
 Write-Host "========================================" -ForegroundColor Yellow
 Write-Host "  VLGR Build Script" -ForegroundColor Yellow
-Write-Host "  Build time: $buildTime" -ForegroundColor Yellow
 Write-Host "========================================" -ForegroundColor Yellow
 Write-Host ""
 

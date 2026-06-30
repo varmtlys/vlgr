@@ -26,7 +26,6 @@ var httpClient = &http.Client{
 }
 
 const (
-	relayIdleTimeout       = 5 * time.Minute
 	maxConcurrentLocalReqs = 100
 )
 
@@ -249,7 +248,7 @@ func (t *Tunnel) handleStreamData(frame protocol.Frame) {
 	default:
 	}
 
-	relay.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	relay.conn.SetWriteDeadline(time.Now().Add(protocol.WriteWait))
 	if _, err := relay.conn.Write(frame.Payload); err != nil {
 		log.Printf("[client] stream write error for request %d: %v", frame.RequestID, err)
 		relay.closeDone()
@@ -272,13 +271,13 @@ func (t *Tunnel) handleStreamClose(frame protocol.Frame) {
 }
 
 func (t *Tunnel) pingLoop() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(protocol.PingPeriod)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
 			t.writeMu.Lock()
-			t.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			t.conn.SetWriteDeadline(time.Now().Add(protocol.WriteWait))
 			if err := t.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				t.writeMu.Unlock()
 				return
@@ -293,6 +292,18 @@ func (t *Tunnel) pingLoop() {
 func (t *Tunnel) portFor(tunnelID uint64) (uint16, bool) {
 	port, ok := t.mappings[tunnelID]
 	return port, ok
+}
+
+func copyHeaders(dst http.Header, src map[string][]string, host string) {
+	for k, values := range src {
+		if k == "Content-Length" || k == "Transfer-Encoding" {
+			continue
+		}
+		for _, v := range values {
+			dst.Add(k, v)
+		}
+	}
+	dst.Set("Host", host)
 }
 
 func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
@@ -368,15 +379,7 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 		return
 	}
 
-	for k, values := range req.Headers {
-		if k == "Content-Length" || k == "Transfer-Encoding" {
-			continue
-		}
-		for _, v := range values {
-			httpReq.Header.Add(k, v)
-		}
-	}
-	httpReq.Header.Set("Host", fmt.Sprintf("localhost:%d", localPort))
+	copyHeaders(httpReq.Header, req.Headers, fmt.Sprintf("localhost:%d", localPort))
 
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
@@ -452,15 +455,7 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 		return
 	}
 
-	for k, values := range req.Headers {
-		if k == "Content-Length" || k == "Transfer-Encoding" {
-			continue
-		}
-		for _, v := range values {
-			httpReq.Header.Add(k, v)
-		}
-	}
-	httpReq.Host = fmt.Sprintf("localhost:%d", localPort)
+	copyHeaders(httpReq.Header, req.Headers, fmt.Sprintf("localhost:%d", localPort))
 
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
 	if err := httpReq.Write(conn); err != nil {
@@ -535,13 +530,13 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 	}()
 
 	buf := make([]byte, protocol.StreamBufSize)
-	conn.SetReadDeadline(time.Now().Add(relayIdleTimeout))
+	conn.SetReadDeadline(time.Now().Add(protocol.RelayIdleTimeout))
 	for {
 		n, err := br.Read(buf)
 		if err != nil {
 			return
 		}
-		conn.SetReadDeadline(time.Now().Add(relayIdleTimeout))
+		conn.SetReadDeadline(time.Now().Add(protocol.RelayIdleTimeout))
 		if err := t.writeFrame(protocol.Frame{
 			Type:      protocol.MsgStreamData,
 			TunnelID:  tunnelID,
@@ -567,7 +562,7 @@ func (t *Tunnel) writeFrame(frame protocol.Frame) error {
 	data := protocol.EncodeFrame(frame)
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
-	t.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	t.conn.SetWriteDeadline(time.Now().Add(protocol.WriteWait))
 	return t.conn.WriteMessage(websocket.BinaryMessage, data)
 }
 

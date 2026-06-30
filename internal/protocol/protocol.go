@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const (
@@ -29,6 +30,16 @@ const (
 
 	MaxHeaders         = 256
 	MaxValuesPerHeader = 64
+
+	WriteWait        = 10 * time.Second
+	PongWait         = 60 * time.Second
+	PingPeriod       = 30 * time.Second
+	RequestTimeout   = 30 * time.Second
+	RelayIdleTimeout = 5 * time.Minute
+
+	MaxTunnelsPerClient = 20
+	StreamRelayBuf      = 256
+	StreamSendTimeout   = 10 * time.Second
 )
 
 type Frame struct {
