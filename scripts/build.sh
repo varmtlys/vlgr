@@ -19,7 +19,6 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${PROJECT_ROOT}/build"
 
 LDFLAGS="-s -w"
-BUILD_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 TARGETS_FILTER=""
 
@@ -87,7 +86,6 @@ build_app() {
 
 echo -e "${YELLOW}========================================"
 echo -e "  VLGR Build Script"
-echo -e "  Build time: $BUILD_TIME"
 echo -e "========================================${NC}"
 echo ""
 

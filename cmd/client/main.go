@@ -36,7 +36,7 @@ func parsePorts(s string) ([]uint16, error) {
 			return nil, err
 		}
 		if p <= 0 || p > 65535 {
-			return nil, err
+			return nil, fmt.Errorf("port out of range: %d", p)
 		}
 		ports = append(ports, uint16(p))
 	}

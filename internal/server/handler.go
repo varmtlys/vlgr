@@ -15,23 +15,6 @@ import (
 	"vlgr/internal/protocol"
 )
 
-var requestIDCounter uint64
-
-func nextRequestID() uint64 {
-	return atomic.AddUint64(&requestIDCounter, 1)
-}
-
-const (
-	writeWait      = 10 * time.Second
-	pongWait       = 60 * time.Second
-	pingPeriod     = 30 * time.Second
-	requestTimeout = 30 * time.Second
-
-	maxTunnelsPerClient = 20
-	streamRelayBuf      = 256
-	streamSendTimeout   = 10 * time.Second
-)
-
 type pendingReq struct {
 	response    chan protocol.HTTPResponse
 	streamData  chan []byte
@@ -62,9 +45,10 @@ type ClientHandler struct {
 	authenticated bool
 	debug         bool
 
-	pending map[uint64]*pendingReq
-	mu      sync.Mutex
-	writeMu sync.Mutex
+	pending      map[uint64]*pendingReq
+	mu           sync.Mutex
+	writeMu      sync.Mutex
+	requestIDSeq uint64
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -87,20 +71,30 @@ func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain strin
 	return h
 }
 
+func (h *ClientHandler) nextRequestID() uint64 {
+	return atomic.AddUint64(&h.requestIDSeq, 1)
+}
+
+func (h *ClientHandler) removePending(requestID uint64) {
+	h.mu.Lock()
+	delete(h.pending, requestID)
+	h.mu.Unlock()
+}
+
 func (h *ClientHandler) Run() {
 	defer h.cleanup()
 
 	h.conn.SetReadLimit(protocol.MaxBodySize + protocol.HeaderSize)
-	h.conn.SetReadDeadline(time.Now().Add(pongWait))
+	h.conn.SetReadDeadline(time.Now().Add(protocol.PongWait))
 	h.conn.SetPongHandler(func(string) error {
-		h.conn.SetReadDeadline(time.Now().Add(pongWait))
+		h.conn.SetReadDeadline(time.Now().Add(protocol.PongWait))
 		return nil
 	})
 
 	go h.pingLoop()
 
 	for {
-		h.conn.SetReadDeadline(time.Now().Add(pongWait))
+		h.conn.SetReadDeadline(time.Now().Add(protocol.PongWait))
 		_, msg, err := h.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
@@ -153,13 +147,13 @@ func (h *ClientHandler) handleFrame(frame protocol.Frame) {
 }
 
 func (h *ClientHandler) pingLoop() {
-	ticker := time.NewTicker(pingPeriod)
+	ticker := time.NewTicker(protocol.PingPeriod)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
 			h.writeMu.Lock()
-			h.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			h.conn.SetWriteDeadline(time.Now().Add(protocol.WriteWait))
 			if err := h.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				h.writeMu.Unlock()
 				return
@@ -223,9 +217,9 @@ func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 	}
 
 	h.mu.Lock()
-	if h.tunnelCount >= maxTunnelsPerClient {
+	if h.tunnelCount >= protocol.MaxTunnelsPerClient {
 		h.mu.Unlock()
-		h.writeError(0, fmt.Sprintf("too many tunnels: max %d per client", maxTunnelsPerClient))
+		h.writeError(0, fmt.Sprintf("too many tunnels: max %d per client", protocol.MaxTunnelsPerClient))
 		return
 	}
 	tunnel, err := h.registry.Register(requestedSubdomain, localPort, h)
@@ -299,7 +293,7 @@ func (h *ClientHandler) handleStreamData(frame protocol.Frame) {
 		select {
 		case pr.streamData <- frame.Payload:
 		case <-pr.done:
-		case <-time.After(streamSendTimeout):
+		case <-time.After(protocol.StreamSendTimeout):
 			log.Printf("[handler] stream send timeout for request %d (slow consumer)", frame.RequestID)
 		}
 	}()
@@ -321,7 +315,7 @@ func (h *ClientHandler) handleStreamClose(frame protocol.Frame) {
 }
 
 func (h *ClientHandler) ForwardHTTP(tunnelID uint64, req protocol.HTTPRequest, streamData chan []byte) (requestID uint64, resp protocol.HTTPResponse, cleanup func(), err error) {
-	requestID = nextRequestID()
+	requestID = h.nextRequestID()
 
 	if h.debug {
 		log.Printf("[debug] forward request #%d: %s %s (%d headers, %d body bytes)",
@@ -345,21 +339,17 @@ func (h *ClientHandler) ForwardHTTP(tunnelID uint64, req protocol.HTTPRequest, s
 	}
 
 	if err := h.writeMessage(protocol.MsgHTTPReq, tunnelID, requestID, payload); err != nil {
-		h.mu.Lock()
-		delete(h.pending, requestID)
-		h.mu.Unlock()
+		h.removePending(requestID)
 		pr.closeDone()
 		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: write error: %w", err)
 	}
 
 	select {
 	case resp = <-pr.response:
-	case <-time.After(requestTimeout):
-		h.mu.Lock()
-		delete(h.pending, requestID)
-		h.mu.Unlock()
+	case <-time.After(protocol.RequestTimeout):
+		h.removePending(requestID)
 		pr.closeDone()
-		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: timeout after %v", requestTimeout)
+		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: timeout after %v", protocol.RequestTimeout)
 	}
 
 	if h.debug {
@@ -368,21 +358,16 @@ func (h *ClientHandler) ForwardHTTP(tunnelID uint64, req protocol.HTTPRequest, s
 	}
 
 	if streamData == nil {
-		h.mu.Lock()
-		delete(h.pending, requestID)
-		h.mu.Unlock()
+		h.removePending(requestID)
 		pr.closeDone()
-		cleanup = func() {}
-	} else {
-		cleanup = func() {
-			h.mu.Lock()
-			delete(h.pending, requestID)
-			h.mu.Unlock()
-			pr.closeDone()
-		}
 	}
 
-	return requestID, resp, cleanup, nil
+	return requestID, resp, func() {
+		if streamData != nil {
+			h.removePending(requestID)
+			pr.closeDone()
+		}
+	}, nil
 }
 
 func (h *ClientHandler) SendStreamData(requestID uint64, data []byte) error {
@@ -408,7 +393,7 @@ func (h *ClientHandler) writeMessage(msgType byte, tunnelID, requestID uint64, p
 	h.writeMu.Lock()
 	defer h.writeMu.Unlock()
 
-	h.conn.SetWriteDeadline(time.Now().Add(writeWait))
+	h.conn.SetWriteDeadline(time.Now().Add(protocol.WriteWait))
 	return h.conn.WriteMessage(websocket.BinaryMessage, frame)
 }
 

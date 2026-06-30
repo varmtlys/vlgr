@@ -10,14 +10,16 @@ import (
 )
 
 func TestNextRequestID_Concurrent(t *testing.T) {
-	requestIDCounter = 0
+	h := &ClientHandler{
+		done: make(chan struct{}),
+	}
 	var results [100]uint64
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			results[idx] = nextRequestID()
+			results[idx] = h.nextRequestID()
 		}(i)
 	}
 	wg.Wait()
@@ -35,10 +37,12 @@ func TestNextRequestID_Concurrent(t *testing.T) {
 }
 
 func TestNextRequestID_Monotonic(t *testing.T) {
-	requestIDCounter = 0
-	prev := nextRequestID()
+	h := &ClientHandler{
+		done: make(chan struct{}),
+	}
+	prev := h.nextRequestID()
 	for i := 0; i < 1000; i++ {
-		next := nextRequestID()
+		next := h.nextRequestID()
 		if next <= prev {
 			t.Errorf("not monotonic: %d <= %d", next, prev)
 		}
@@ -47,7 +51,6 @@ func TestNextRequestID_Monotonic(t *testing.T) {
 }
 
 func TestHandleRegister_InvalidPayload(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -62,7 +65,6 @@ func TestHandleRegister_InvalidPayload(t *testing.T) {
 }
 
 func TestHandleRegister_PortZero(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -78,7 +80,6 @@ func TestHandleRegister_PortZero(t *testing.T) {
 }
 
 func TestHandleRegister_SubdomainTooLong(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -95,7 +96,6 @@ func TestHandleRegister_SubdomainTooLong(t *testing.T) {
 }
 
 func TestHandleRegister_PublicURLTooLong(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -118,7 +118,6 @@ func TestHandleRegister_PublicURLTooLong(t *testing.T) {
 }
 
 func TestHandleRegister_Success(t *testing.T) {
-	requestIDCounter = 0
 	r := NewRegistry()
 	h := &ClientHandler{
 		authenticated: true,
@@ -144,7 +143,6 @@ func TestHandleRegister_Success(t *testing.T) {
 }
 
 func TestHandleRegister_WithSubdomain(t *testing.T) {
-	requestIDCounter = 0
 	r := NewRegistry()
 	h := &ClientHandler{
 		authenticated: true,
@@ -169,7 +167,6 @@ func TestHandleRegister_WithSubdomain(t *testing.T) {
 }
 
 func TestHandleAuth_InvalidToken(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		expectedToken: "secret",
 		registry:      NewRegistry(),
@@ -186,7 +183,6 @@ func TestHandleAuth_InvalidToken(t *testing.T) {
 }
 
 func TestHandleAuth_ValidToken(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		expectedToken: "secret",
 		registry:      NewRegistry(),
@@ -203,7 +199,6 @@ func TestHandleAuth_ValidToken(t *testing.T) {
 }
 
 func TestHandleAuth_EmptyToken(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		expectedToken: "",
 		registry:      NewRegistry(),
@@ -219,7 +214,6 @@ func TestHandleAuth_EmptyToken(t *testing.T) {
 }
 
 func TestHandleFrame_RejectBeforeAuth(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		registry: NewRegistry(),
 		tunnels:  make(map[uint64]*Tunnel),
@@ -240,7 +234,6 @@ func TestHandleFrame_RejectBeforeAuth(t *testing.T) {
 }
 
 func TestHandleFrame_UnknownType(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -253,7 +246,6 @@ func TestHandleFrame_UnknownType(t *testing.T) {
 }
 
 func TestForwardHTTP_WriteError(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -278,7 +270,6 @@ func TestForwardHTTP_WriteError(t *testing.T) {
 }
 
 func TestCleanup_ClosesAllPending(t *testing.T) {
-	requestIDCounter = 0
 	r := NewRegistry()
 	h := &ClientHandler{
 		authenticated: true,
@@ -322,7 +313,6 @@ func TestCleanup_ClosesAllPending(t *testing.T) {
 }
 
 func TestHandleHTTPRes_NoPending(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -341,7 +331,6 @@ func TestHandleHTTPRes_NoPending(t *testing.T) {
 }
 
 func TestHandleStreamData_NoPending(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -357,7 +346,6 @@ func TestHandleStreamData_NoPending(t *testing.T) {
 }
 
 func TestHandleStreamClose_NoPending(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -370,7 +358,6 @@ func TestHandleStreamClose_NoPending(t *testing.T) {
 }
 
 func TestHandleStreamData_NotStreamPending(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -392,7 +379,6 @@ func TestHandleStreamData_NotStreamPending(t *testing.T) {
 }
 
 func TestForwardHTTP_Timeout(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -415,7 +401,6 @@ func TestForwardHTTP_Timeout(t *testing.T) {
 }
 
 func TestHandleHTTPRes_WithPending(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -442,7 +427,6 @@ func TestHandleHTTPRes_WithPending(t *testing.T) {
 }
 
 func TestHandleHTTPRes_WithPending_Done(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -465,7 +449,6 @@ func TestHandleHTTPRes_WithPending_Done(t *testing.T) {
 }
 
 func TestHandleStreamData_WithPending(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -489,7 +472,6 @@ func TestHandleStreamData_WithPending(t *testing.T) {
 }
 
 func TestHandleStreamData_WithPending_Done(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -509,7 +491,6 @@ func TestHandleStreamData_WithPending_Done(t *testing.T) {
 }
 
 func TestHandleStreamClose_WithPending(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -537,7 +518,6 @@ func TestHandleStreamClose_WithPending(t *testing.T) {
 }
 
 func TestHandleFrame_CloseTunnel(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -556,7 +536,6 @@ func TestHandleFrame_CloseTunnel(t *testing.T) {
 }
 
 func TestHandleHTTPRes_DecodeError(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -572,7 +551,6 @@ func TestHandleHTTPRes_DecodeError(t *testing.T) {
 }
 
 func TestHandleRegister_SubdomainEmpty(t *testing.T) {
-	requestIDCounter = 0
 	r := NewRegistry()
 	h := &ClientHandler{
 		authenticated: true,
@@ -594,7 +572,6 @@ func TestHandleRegister_SubdomainEmpty(t *testing.T) {
 }
 
 func TestForwardHTTP_Success(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -617,7 +594,6 @@ func TestForwardHTTP_Success(t *testing.T) {
 }
 
 func TestForwardHTTP_TimeoutPath(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -663,7 +639,6 @@ func TestPendingReq_DoubleCloseStream_NoPanic(t *testing.T) {
 }
 
 func TestCleanup_DoesNotPanicOnDoubleCall(t *testing.T) {
-	requestIDCounter = 0
 	h := &ClientHandler{
 		authenticated: true,
 		registry:      NewRegistry(),
@@ -682,7 +657,6 @@ func TestCleanup_DoesNotPanicOnDoubleCall(t *testing.T) {
 }
 
 func TestHandleRegister_MaxTunnelsPerClient(t *testing.T) {
-	requestIDCounter = 0
 	r := NewRegistry()
 	h := &ClientHandler{
 		authenticated: true,
@@ -692,26 +666,25 @@ func TestHandleRegister_MaxTunnelsPerClient(t *testing.T) {
 		baseDomain:    "test.local",
 		done:          make(chan struct{}),
 	}
-	for i := 0; i < maxTunnelsPerClient; i++ {
+	for i := 0; i < protocol.MaxTunnelsPerClient; i++ {
 		payload := make([]byte, 2)
 		payload[0] = byte(3000 + i >> 8)
 		payload[1] = byte(3000 + i)
 		h.handleRegister(protocol.Frame{Payload: payload})
 	}
-	if len(h.tunnels) != maxTunnelsPerClient {
-		t.Fatalf("expected %d tunnels, got %d", maxTunnelsPerClient, len(h.tunnels))
+	if len(h.tunnels) != protocol.MaxTunnelsPerClient {
+		t.Fatalf("expected %d tunnels, got %d", protocol.MaxTunnelsPerClient, len(h.tunnels))
 	}
 	payload := make([]byte, 2)
 	payload[0] = 0
 	payload[1] = 99
 	h.handleRegister(protocol.Frame{Payload: payload})
-	if len(h.tunnels) != maxTunnelsPerClient {
-		t.Errorf("tunnel count exceeded: got %d, want %d", len(h.tunnels), maxTunnelsPerClient)
+	if len(h.tunnels) != protocol.MaxTunnelsPerClient {
+		t.Errorf("tunnel count exceeded: got %d, want %d", len(h.tunnels), protocol.MaxTunnelsPerClient)
 	}
 }
 
 func TestHandleRegister_RejectsBadSubdomain(t *testing.T) {
-	requestIDCounter = 0
 	r := NewRegistry()
 	h := &ClientHandler{
 		authenticated: true,
@@ -778,7 +751,6 @@ func TestValidHeaderName(t *testing.T) {
 }
 
 func TestCleanupRace_DoneAndStream_NoPanic(t *testing.T) {
-	requestIDCounter = 0
 	r := NewRegistry()
 	h := &ClientHandler{
 		authenticated: true,

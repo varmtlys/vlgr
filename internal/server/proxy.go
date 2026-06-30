@@ -12,10 +12,6 @@ import (
 	"vlgr/internal/protocol"
 )
 
-const (
-	relayIdleTimeout = 5 * time.Minute
-)
-
 type ReverseProxy struct {
 	registry   *Registry
 	baseDomain string
@@ -87,7 +83,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var streamData chan []byte
 	if protocol.IsWebSocketUpgrade(r) {
-		streamData = make(chan []byte, streamRelayBuf)
+		streamData = make(chan []byte, protocol.StreamRelayBuf)
 		if p.debug {
 			log.Printf("[debug] WebSocket upgrade detected for %s", requestPath)
 		}
@@ -99,11 +95,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tunnel error", http.StatusBadGateway)
 		return
 	}
-	defer func() {
-		if cleanup != nil {
-			cleanup()
-		}
-	}()
+	defer cleanup()
 
 	if streamData == nil {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -171,14 +163,14 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		buf := make([]byte, protocol.StreamBufSize)
-		conn.SetReadDeadline(time.Now().Add(relayIdleTimeout))
+		conn.SetReadDeadline(time.Now().Add(protocol.RelayIdleTimeout))
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
 				tunnel.Handler.SendStreamClose(requestID)
 				return
 			}
-			conn.SetReadDeadline(time.Now().Add(relayIdleTimeout))
+			conn.SetReadDeadline(time.Now().Add(protocol.RelayIdleTimeout))
 			if err := tunnel.Handler.SendStreamData(requestID, buf[:n]); err != nil {
 				tunnel.Handler.SendStreamClose(requestID)
 				return
@@ -189,7 +181,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		for data := range streamData {
-			conn.SetWriteDeadline(time.Now().Add(relayIdleTimeout))
+			conn.SetWriteDeadline(time.Now().Add(protocol.RelayIdleTimeout))
 			if _, err := conn.Write(data); err != nil {
 				return
 			}
