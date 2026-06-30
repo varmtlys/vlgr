@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"sync"
 	"testing"
@@ -176,6 +177,7 @@ func TestHandleAuth_InvalidToken(t *testing.T) {
 		pending:       make(map[uint64]*pendingReq),
 		done:          make(chan struct{}),
 	}
+	h.expectedHash = sha256.Sum256([]byte("secret"))
 
 	h.handleAuth(protocol.Frame{Payload: []byte("wrong")})
 	if h.authenticated {
@@ -192,6 +194,7 @@ func TestHandleAuth_ValidToken(t *testing.T) {
 		pending:       make(map[uint64]*pendingReq),
 		done:          make(chan struct{}),
 	}
+	h.expectedHash = sha256.Sum256([]byte("secret"))
 
 	h.handleAuth(protocol.Frame{Payload: []byte("secret")})
 	if !h.authenticated {
@@ -638,4 +641,166 @@ func TestForwardHTTP_TimeoutPath(t *testing.T) {
 	if len(h.pending) != 0 {
 		t.Error("pending should be empty after error cleanup")
 	}
+}
+
+func TestPendingReq_DoubleCloseDone_NoPanic(t *testing.T) {
+	pr := &pendingReq{
+		response: make(chan protocol.HTTPResponse, 1),
+		done:     make(chan struct{}),
+	}
+	pr.closeDone()
+	pr.closeDone()
+	pr.closeDone()
+}
+
+func TestPendingReq_DoubleCloseStream_NoPanic(t *testing.T) {
+	pr := &pendingReq{
+		streamData: make(chan []byte, 1),
+		done:       make(chan struct{}),
+	}
+	pr.closeStream()
+	pr.closeStream()
+}
+
+func TestCleanup_DoesNotPanicOnDoubleCall(t *testing.T) {
+	requestIDCounter = 0
+	h := &ClientHandler{
+		authenticated: true,
+		registry:      NewRegistry(),
+		tunnels:       make(map[uint64]*Tunnel),
+		pending:       make(map[uint64]*pendingReq),
+		done:          make(chan struct{}),
+	}
+	pr := &pendingReq{
+		streamData: make(chan []byte, 1),
+		done:       make(chan struct{}),
+	}
+	h.pending[1] = pr
+
+	h.cleanup()
+	h.cleanup()
+}
+
+func TestHandleRegister_MaxTunnelsPerClient(t *testing.T) {
+	requestIDCounter = 0
+	r := NewRegistry()
+	h := &ClientHandler{
+		authenticated: true,
+		registry:      r,
+		tunnels:       make(map[uint64]*Tunnel),
+		pending:       make(map[uint64]*pendingReq),
+		baseDomain:    "test.local",
+		done:          make(chan struct{}),
+	}
+	for i := 0; i < maxTunnelsPerClient; i++ {
+		payload := make([]byte, 2)
+		payload[0] = byte(3000 + i >> 8)
+		payload[1] = byte(3000 + i)
+		h.handleRegister(protocol.Frame{Payload: payload})
+	}
+	if len(h.tunnels) != maxTunnelsPerClient {
+		t.Fatalf("expected %d tunnels, got %d", maxTunnelsPerClient, len(h.tunnels))
+	}
+	payload := make([]byte, 2)
+	payload[0] = 0
+	payload[1] = 99
+	h.handleRegister(protocol.Frame{Payload: payload})
+	if len(h.tunnels) != maxTunnelsPerClient {
+		t.Errorf("tunnel count exceeded: got %d, want %d", len(h.tunnels), maxTunnelsPerClient)
+	}
+}
+
+func TestHandleRegister_RejectsBadSubdomain(t *testing.T) {
+	requestIDCounter = 0
+	r := NewRegistry()
+	h := &ClientHandler{
+		authenticated: true,
+		registry:      r,
+		tunnels:       make(map[uint64]*Tunnel),
+		pending:       make(map[uint64]*pendingReq),
+		baseDomain:    "test.local",
+		done:          make(chan struct{}),
+	}
+	for _, bad := range []string{"a..b", "a/b", "a b", "evil;inject", "a$b"} {
+		payload := make([]byte, 2+1+len(bad))
+		payload[0] = 0
+		payload[1] = 80
+		payload[2] = byte(len(bad))
+		copy(payload[3:], bad)
+		before := len(h.tunnels)
+		h.handleRegister(protocol.Frame{Payload: payload})
+		if len(h.tunnels) != before {
+			t.Errorf("subdomain %q should be rejected, but registered", bad)
+		}
+	}
+}
+
+func TestValidSubdomain(t *testing.T) {
+	good := []string{"", "abc", "a-b-c", "abc123", "MyApp", "xn--abc"}
+	for _, s := range good {
+		if !validSubdomain(s) {
+			t.Errorf("validSubdomain(%q) = false, want true", s)
+		}
+	}
+	bad := []string{"a..b", "a/b", "a b", "evil;inject", "a$b", "a@b", "a\nb"}
+	for _, s := range bad {
+		if validSubdomain(s) {
+			t.Errorf("validSubdomain(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestValidHeaderValue(t *testing.T) {
+	if !validHeaderValue("plain text") {
+		t.Error("plain text should be valid")
+	}
+	if validHeaderValue("with\rCRLF") {
+		t.Error("CRLF must be invalid")
+	}
+	if validHeaderValue("with\nLF") {
+		t.Error("LF must be invalid")
+	}
+	if validHeaderValue("with\x00null") {
+		t.Error("NUL must be invalid")
+	}
+}
+
+func TestValidHeaderName(t *testing.T) {
+	if !validHeaderName("Content-Type") {
+		t.Error("Content-Type should be valid")
+	}
+	if validHeaderName("a b") {
+		t.Error("space must be invalid")
+	}
+	if validHeaderName("a:b") {
+		t.Error("colon must be invalid")
+	}
+}
+
+func TestCleanupRace_DoneAndStream_NoPanic(t *testing.T) {
+	requestIDCounter = 0
+	r := NewRegistry()
+	h := &ClientHandler{
+		authenticated: true,
+		registry:      r,
+		tunnels:       make(map[uint64]*Tunnel),
+		pending:       make(map[uint64]*pendingReq),
+		done:          make(chan struct{}),
+	}
+	pr := &pendingReq{
+		streamData: make(chan []byte, 256),
+		done:       make(chan struct{}),
+	}
+	h.pending[42] = pr
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	for i := 0; i < 3; i++ {
+		go func() {
+			defer wg.Done()
+			defer func() { _ = recover() }()
+			h.cleanup()
+		}()
+	}
+	wg.Wait()
 }

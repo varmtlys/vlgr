@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
@@ -25,20 +26,39 @@ const (
 	pongWait       = 60 * time.Second
 	pingPeriod     = 30 * time.Second
 	requestTimeout = 30 * time.Second
+
+	maxTunnelsPerClient = 20
+	streamRelayBuf      = 256
+	streamSendTimeout   = 10 * time.Second
 )
 
 type pendingReq struct {
-	response   chan protocol.HTTPResponse
-	streamData chan []byte
-	done       chan struct{}
+	response    chan protocol.HTTPResponse
+	streamData  chan []byte
+	done        chan struct{}
+	doneOnce    sync.Once
+	streamOnce  sync.Once
+}
+
+func (pr *pendingReq) closeDone() {
+	pr.doneOnce.Do(func() { close(pr.done) })
+}
+
+func (pr *pendingReq) closeStream() {
+	if pr.streamData == nil {
+		return
+	}
+	pr.streamOnce.Do(func() { close(pr.streamData) })
 }
 
 type ClientHandler struct {
 	conn          *websocket.Conn
 	registry      *Registry
 	tunnels       map[uint64]*Tunnel
+	tunnelCount   int
 	baseDomain    string
 	expectedToken string
+	expectedHash  [32]byte
 	authenticated bool
 	debug         bool
 
@@ -51,7 +71,7 @@ type ClientHandler struct {
 }
 
 func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain string, expectedToken string, debug bool) *ClientHandler {
-	return &ClientHandler{
+	h := &ClientHandler{
 		conn:          conn,
 		registry:      registry,
 		tunnels:       make(map[uint64]*Tunnel),
@@ -61,6 +81,10 @@ func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain strin
 		pending:       make(map[uint64]*pendingReq),
 		done:          make(chan struct{}),
 	}
+	if expectedToken != "" {
+		h.expectedHash = sha256.Sum256([]byte(expectedToken))
+	}
+	return h
 }
 
 func (h *ClientHandler) Run() {
@@ -148,10 +172,13 @@ func (h *ClientHandler) pingLoop() {
 }
 
 func (h *ClientHandler) handleAuth(frame protocol.Frame) {
-	if h.expectedToken != "" && subtle.ConstantTimeCompare([]byte(h.expectedToken), frame.Payload) != 1 {
-		log.Printf("[handler] auth rejected: invalid token")
-		h.writeMessage(protocol.MsgAuthErr, 0, 0, []byte("invalid token"))
-		return
+	if h.expectedToken != "" {
+		gotHash := sha256.Sum256(frame.Payload)
+		if subtle.ConstantTimeCompare(h.expectedHash[:], gotHash[:]) != 1 {
+			log.Printf("[handler] auth rejected: invalid token")
+			h.writeMessage(protocol.MsgAuthErr, 0, 0, []byte("invalid token"))
+			return
+		}
 	}
 	h.authenticated = true
 	log.Printf("[handler] client authenticated")
@@ -169,6 +196,7 @@ func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 		h.writeError(0, "invalid port: 0")
 		return
 	}
+
 	requestedSubdomain := ""
 	if len(frame.Payload) >= 3 {
 		n := int(frame.Payload[2])
@@ -180,6 +208,10 @@ func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 			requestedSubdomain = string(frame.Payload[3 : 3+n])
 		}
 	}
+	if !validSubdomain(requestedSubdomain) {
+		h.writeError(0, "invalid subdomain characters")
+		return
+	}
 	if requestedSubdomain == "" {
 		requestedSubdomain = generateSubdomain()
 	}
@@ -190,13 +222,21 @@ func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 		return
 	}
 
+	h.mu.Lock()
+	if h.tunnelCount >= maxTunnelsPerClient {
+		h.mu.Unlock()
+		h.writeError(0, fmt.Sprintf("too many tunnels: max %d per client", maxTunnelsPerClient))
+		return
+	}
 	tunnel, err := h.registry.Register(requestedSubdomain, localPort, h)
 	if err != nil {
+		h.mu.Unlock()
 		h.writeMessage(protocol.MsgRegisterErr, 0, 0, []byte(err.Error()))
 		return
 	}
-
 	h.tunnels[tunnel.ID] = tunnel
+	h.tunnelCount++
+	h.mu.Unlock()
 
 	respPayload := append([]byte{byte(len(publicURL))}, []byte(publicURL)...)
 	tunnelIDBytes := make([]byte, 8)
@@ -259,6 +299,8 @@ func (h *ClientHandler) handleStreamData(frame protocol.Frame) {
 		select {
 		case pr.streamData <- frame.Payload:
 		case <-pr.done:
+		case <-time.After(streamSendTimeout):
+			log.Printf("[handler] stream send timeout for request %d (slow consumer)", frame.RequestID)
 		}
 	}()
 }
@@ -275,7 +317,7 @@ func (h *ClientHandler) handleStreamClose(frame protocol.Frame) {
 		return
 	}
 
-	close(pr.streamData)
+	pr.closeStream()
 }
 
 func (h *ClientHandler) ForwardHTTP(tunnelID uint64, req protocol.HTTPRequest, streamData chan []byte) (requestID uint64, resp protocol.HTTPResponse, cleanup func(), err error) {
@@ -306,7 +348,7 @@ func (h *ClientHandler) ForwardHTTP(tunnelID uint64, req protocol.HTTPRequest, s
 		h.mu.Lock()
 		delete(h.pending, requestID)
 		h.mu.Unlock()
-		close(pr.done)
+		pr.closeDone()
 		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: write error: %w", err)
 	}
 
@@ -316,7 +358,7 @@ func (h *ClientHandler) ForwardHTTP(tunnelID uint64, req protocol.HTTPRequest, s
 		h.mu.Lock()
 		delete(h.pending, requestID)
 		h.mu.Unlock()
-		close(pr.done)
+		pr.closeDone()
 		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: timeout after %v", requestTimeout)
 	}
 
@@ -329,14 +371,14 @@ func (h *ClientHandler) ForwardHTTP(tunnelID uint64, req protocol.HTTPRequest, s
 		h.mu.Lock()
 		delete(h.pending, requestID)
 		h.mu.Unlock()
-		close(pr.done)
+		pr.closeDone()
 		cleanup = func() {}
 	} else {
 		cleanup = func() {
 			h.mu.Lock()
 			delete(h.pending, requestID)
 			h.mu.Unlock()
-			close(pr.done)
+			pr.closeDone()
 		}
 	}
 
@@ -382,10 +424,8 @@ func (h *ClientHandler) cleanup() {
 
 	h.mu.Lock()
 	for id, pr := range h.pending {
-		if pr.streamData != nil {
-			close(pr.streamData)
-		}
-		close(pr.done)
+		pr.closeStream()
+		pr.closeDone()
 		delete(h.pending, id)
 	}
 	h.mu.Unlock()
@@ -394,4 +434,25 @@ func (h *ClientHandler) cleanup() {
 	if h.conn != nil {
 		h.conn.Close()
 	}
+}
+
+func validSubdomain(s string) bool {
+	if s == "" {
+		return true
+	}
+	if len(s) > 63 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }

@@ -26,6 +26,9 @@ const (
 	HeaderSize    = 21
 	MaxBodySize   = 32 << 20
 	StreamBufSize = 32 * 1024
+
+	MaxHeaders         = 256
+	MaxValuesPerHeader = 64
 )
 
 type Frame struct {
@@ -88,6 +91,9 @@ func readString(reader *bytes.Reader) (string, error) {
 	if err := binary.Read(reader, binary.BigEndian, &length); err != nil {
 		return "", err
 	}
+	if int(length) > reader.Len() {
+		return "", fmt.Errorf("string length %d exceeds remaining payload %d", length, reader.Len())
+	}
 	buf := make([]byte, length)
 	if _, err := io.ReadFull(reader, buf); err != nil {
 		return "", err
@@ -111,6 +117,12 @@ func readHeaders(reader *bytes.Reader) (map[string][]string, error) {
 	if err := binary.Read(reader, binary.BigEndian, &count); err != nil {
 		return nil, fmt.Errorf("read header count: %w", err)
 	}
+	if count > MaxHeaders {
+		return nil, fmt.Errorf("too many headers: %d > %d", count, MaxHeaders)
+	}
+	if int(count)*2 > reader.Len() {
+		return nil, fmt.Errorf("header count %d cannot fit in %d remaining bytes", count, reader.Len())
+	}
 	headers := make(map[string][]string, count)
 	for i := uint32(0); i < count; i++ {
 		k, err := readString(reader)
@@ -120,6 +132,9 @@ func readHeaders(reader *bytes.Reader) (map[string][]string, error) {
 		var valueCount uint32
 		if err := binary.Read(reader, binary.BigEndian, &valueCount); err != nil {
 			return nil, fmt.Errorf("read header value count: %w", err)
+		}
+		if valueCount > MaxValuesPerHeader {
+			return nil, fmt.Errorf("too many values for header %q: %d > %d", k, valueCount, MaxValuesPerHeader)
 		}
 		values := make([]string, valueCount)
 		for j := uint32(0); j < valueCount; j++ {

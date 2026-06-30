@@ -2,9 +2,11 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -41,8 +43,29 @@ func parsePorts(s string) ([]uint16, error) {
 	return ports, nil
 }
 
+var serverAddrRe = regexp.MustCompile(`^[A-Za-z0-9._-]+:[0-9]{1,5}$`)
+
+func validateServerAddr(s string) error {
+	if s == "" {
+		return fmt.Errorf("server address is empty")
+	}
+	if !serverAddrRe.MatchString(s) {
+		return fmt.Errorf("invalid server address %q: must be host:port with no @, /, or scheme", s)
+	}
+	parts := strings.Split(s, ":")
+	p, err := strconv.Atoi(parts[1])
+	if err != nil || p <= 0 || p > 65535 {
+		return fmt.Errorf("invalid port in server address %q", s)
+	}
+	return nil
+}
+
 func main() {
 	flag.Parse()
+
+	if err := validateServerAddr(*serverAddr); err != nil {
+		log.Fatalf("[client] %v", err)
+	}
 
 	if *localPorts == "" {
 		log.Fatal("please specify -local <port> or -local <port1,port2,...>")
@@ -72,8 +95,12 @@ func main() {
 	backoff := 1 * time.Second
 	const maxBackoff = 30 * time.Second
 
+	var tunnel *client.Tunnel
 	for {
-		tunnel := client.NewTunnel(*serverAddr, *token, ports, subs, *useTLS)
+		if tunnel != nil {
+			tunnel.Close()
+		}
+		tunnel = client.NewTunnel(*serverAddr, *token, ports, subs, *useTLS)
 		tunnel.SetDebug(*debug)
 
 		if err := tunnel.Connect(); err != nil {

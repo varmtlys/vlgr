@@ -25,10 +25,20 @@ var httpClient = &http.Client{
 	},
 }
 
+const (
+	relayIdleTimeout       = 5 * time.Minute
+	maxConcurrentLocalReqs = 100
+)
+
 type streamRelay struct {
 	conn      net.Conn
 	requestID uint64
 	done      chan struct{}
+	doneOnce  sync.Once
+}
+
+func (r *streamRelay) closeDone() {
+	r.doneOnce.Do(func() { close(r.done) })
 }
 
 type Tunnel struct {
@@ -44,24 +54,27 @@ type Tunnel struct {
 
 	mappings map[uint64]uint16
 
-	writeMu  sync.Mutex
-	done     chan struct{}
+	writeMu   sync.Mutex
+	done      chan struct{}
 	closeOnce sync.Once
 
 	relays   map[uint64]*streamRelay
 	relaysMu sync.Mutex
+
+	localReqSem chan struct{}
 }
 
 func NewTunnel(serverAddr, token string, ports []uint16, subdomains []string, useTLS bool) *Tunnel {
 	return &Tunnel{
-		serverAddr: serverAddr,
-		token:      token,
-		ports:      ports,
-		subdomains: subdomains,
-		useTLS:     useTLS,
-		done:       make(chan struct{}),
-		mappings:   make(map[uint64]uint16),
-		relays:     make(map[uint64]*streamRelay),
+		serverAddr:  serverAddr,
+		token:       token,
+		ports:       ports,
+		subdomains:  subdomains,
+		useTLS:      useTLS,
+		done:        make(chan struct{}),
+		mappings:    make(map[uint64]uint16),
+		relays:      make(map[uint64]*streamRelay),
+		localReqSem: make(chan struct{}, maxConcurrentLocalReqs),
 	}
 }
 
@@ -84,6 +97,7 @@ func (t *Tunnel) Connect() error {
 		return fmt.Errorf("dial %s: %w", url, err)
 	}
 	conn.SetReadLimit(protocol.MaxBodySize + protocol.HeaderSize)
+	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	t.conn = conn
 
 	authFrame := protocol.EncodeFrame(protocol.Frame{
@@ -231,9 +245,15 @@ func (t *Tunnel) handleStreamData(frame protocol.Frame) {
 
 	select {
 	case <-relay.done:
+		return
 	default:
-		relay.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-		relay.conn.Write(frame.Payload)
+	}
+
+	relay.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	if _, err := relay.conn.Write(frame.Payload); err != nil {
+		log.Printf("[client] stream write error for request %d: %v", frame.RequestID, err)
+		relay.closeDone()
+		relay.conn.Close()
 	}
 }
 
@@ -246,11 +266,7 @@ func (t *Tunnel) handleStreamClose(frame protocol.Frame) {
 	t.relaysMu.Unlock()
 
 	if ok {
-		select {
-		case <-relay.done:
-		default:
-			close(relay.done)
-		}
+		relay.closeDone()
 		relay.conn.Close()
 	}
 }
@@ -280,6 +296,14 @@ func (t *Tunnel) portFor(tunnelID uint64) (uint16, bool) {
 }
 
 func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
+	select {
+	case t.localReqSem <- struct{}{}:
+		defer func() { <-t.localReqSem }()
+	default:
+		t.sendHTTPError(frame.TunnelID, frame.RequestID, 503, "too many concurrent local requests")
+		return
+	}
+
 	req, err := protocol.DecodeHTTPRequest(frame.Payload)
 	if err != nil {
 		log.Printf("[client] decode HTTP request error: %v (payload %d bytes)", err, len(frame.Payload))
@@ -495,11 +519,7 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 	}
 
 	defer func() {
-		select {
-		case <-relay.done:
-		default:
-			close(relay.done)
-		}
+		relay.closeDone()
 		t.relaysMu.Lock()
 		delete(t.relays, requestID)
 		t.relaysMu.Unlock()
@@ -515,11 +535,13 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 	}()
 
 	buf := make([]byte, protocol.StreamBufSize)
+	conn.SetReadDeadline(time.Now().Add(relayIdleTimeout))
 	for {
 		n, err := br.Read(buf)
 		if err != nil {
 			return
 		}
+		conn.SetReadDeadline(time.Now().Add(relayIdleTimeout))
 		if err := t.writeFrame(protocol.Frame{
 			Type:      protocol.MsgStreamData,
 			TunnelID:  tunnelID,
@@ -561,6 +583,15 @@ func (t *Tunnel) Close() {
 	t.closeOnce.Do(func() {
 		close(t.done)
 	})
+
+	t.relaysMu.Lock()
+	for id, relay := range t.relays {
+		relay.closeDone()
+		relay.conn.Close()
+		delete(t.relays, id)
+	}
+	t.relaysMu.Unlock()
+
 	if t.conn != nil {
 		t.writeFrame(protocol.Frame{
 			Type: protocol.MsgCloseTunnel,

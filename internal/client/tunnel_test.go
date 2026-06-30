@@ -2,8 +2,11 @@ package client
 
 import (
 	"encoding/binary"
+	"net"
 	"net/http"
+	"sync"
 	"testing"
+	"time"
 
 	"vlgr/internal/protocol"
 )
@@ -310,3 +313,82 @@ func TestRegisterPayload_Encoding(t *testing.T) {
 		t.Errorf("subdomain: want %q, got %q", subdomain, regPayload[3:])
 	}
 }
+
+func TestStreamRelay_CloseDone_Idempotent(t *testing.T) {
+	r := &streamRelay{
+		done: make(chan struct{}),
+	}
+	r.closeDone()
+	r.closeDone()
+	r.closeDone()
+	select {
+	case <-r.done:
+	default:
+		t.Fatal("done should be closed")
+	}
+}
+
+func TestStreamRelay_CloseDone_RaceNoPanic(t *testing.T) {
+	r := &streamRelay{
+		done: make(chan struct{}),
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { _ = recover() }()
+			r.closeDone()
+		}()
+	}
+	wg.Wait()
+}
+
+func TestTunnel_Close_ClosesAllRelays(t *testing.T) {
+	tun := NewTunnel("x", "", nil, nil, false)
+	tun.relays[1] = &streamRelay{
+		conn: newTestConn(),
+		done: make(chan struct{}),
+	}
+	tun.relays[2] = &streamRelay{
+		conn: newTestConn(),
+		done: make(chan struct{}),
+	}
+	tun.Close()
+	for id, r := range tun.relays {
+		select {
+		case <-r.done:
+		default:
+			t.Errorf("relay %d done should be closed", id)
+		}
+	}
+}
+
+type testConn struct {
+	closed bool
+	mu     sync.Mutex
+}
+
+var errTestClosed = &testNetError{s: "use of closed network connection"}
+
+type testNetError struct{ s string }
+
+func (e *testNetError) Error() string   { return e.s }
+func (e *testNetError) Timeout() bool   { return false }
+func (e *testNetError) Temporary() bool { return false }
+
+func newTestConn() *testConn { return &testConn{} }
+
+func (c *testConn) Read(b []byte) (int, error)  { return 0, &net.OpError{Op: "read", Err: errTestClosed} }
+func (c *testConn) Write(b []byte) (int, error) { return 0, &net.OpError{Op: "write", Err: errTestClosed} }
+func (c *testConn) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	return nil
+}
+func (c *testConn) LocalAddr() net.Addr                { return &net.TCPAddr{} }
+func (c *testConn) RemoteAddr() net.Addr               { return &net.TCPAddr{} }
+func (c *testConn) SetDeadline(t time.Time) error      { return nil }
+func (c *testConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *testConn) SetWriteDeadline(t time.Time) error { return nil }

@@ -21,6 +21,8 @@
 #   --cf-token <t>  Cloudflare API token (requires --caddy)
 #   --no-service    Skip systemd service creation
 #   --no-build      Skip Go build (use pre-built binary from build/linux/)
+#   --ref <ref>     Git ref to checkout (default: main). RECOMMENDED: pin a tag like v1.0
+#   --src-sha256 <h> Verify the cloned source tree matches this sha256 (optional, strong)
 #   --help          Show this help
 #
 # Environment variables:
@@ -39,6 +41,8 @@ CF_TOKEN=""
 NO_SERVICE=false
 NO_BUILD=false
 UNINSTALL=false
+GIT_REF="main"
+SRC_SHA256=""
 REPO_URL="https://github.com/varmtlys/vlgr.git"
 
 # ─── Parse args ──────────────────────────────────────────────────────────────
@@ -54,6 +58,8 @@ while [[ $# -gt 0 ]]; do
     --cf-token) CF_TOKEN="$2"; shift 2 ;;
     --no-service) NO_SERVICE=true; shift ;;
     --no-build) NO_BUILD=true; shift ;;
+    --ref) GIT_REF="$2"; shift 2 ;;
+    --src-sha256) SRC_SHA256="$2"; shift 2 ;;
     --help) sed -n '/^# Usage:/,/^$/p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
@@ -211,16 +217,40 @@ build_server() {
     cd "$build_dir"
   else
     if [[ -d "${INSTALL_PATH}/src" ]]; then
-      log "Building from cached source at ${INSTALL_PATH}/src..."
-      cd "${INSTALL_PATH}/src"
+      log "Updating cached source at ${INSTALL_PATH}/src (ref=${GIT_REF})..."
+      cd "${INSTALL_PATH}/src}"
+      if ! git fetch --depth 1 origin "${GIT_REF}" 2>/dev/null; then
+        log "Shallow fetch failed, trying full fetch..."
+        git fetch origin "${GIT_REF}"
+      fi
+      if ! git checkout --quiet "${GIT_REF}" 2>/dev/null; then
+        log "Checkout of ${GIT_REF} failed, trying FETCH_HEAD..."
+        git checkout --quiet FETCH_HEAD
+      fi
     else
-      log "Cloning repository to ${INSTALL_PATH}/src..."
-      git clone --depth 1 "$REPO_URL" "${INSTALL_PATH}/src"
+      log "Cloning repository (ref=${GIT_REF}) to ${INSTALL_PATH}/src..."
+      git clone --depth 1 --branch "${GIT_REF}" "$REPO_URL" "${INSTALL_PATH}/src"
       cd "${INSTALL_PATH}/src"
     fi
   fi
 
-  has_cmd git && git log --oneline -1 2>/dev/null && log "Source: $(git log --oneline -1 2>/dev/null)" || true
+  if [[ -n "$SRC_SHA256" ]]; then
+    if ! has_cmd git; then
+      err "--src-sha256 requested but git is not available"
+      exit 1
+    fi
+    local got
+    got="$(git rev-parse HEAD)"
+    if [[ "$got" != "$SRC_SHA256" ]]; then
+      err "Source SHA256 mismatch: expected ${SRC_SHA256}, got ${got}"
+      exit 1
+    fi
+    log "Source verified: ${got}"
+  fi
+
+  if has_cmd git; then
+    log "Source: $(git log --oneline -1 2>/dev/null || echo 'unknown')"
+  fi
 
   log "Downloading Go dependencies..."
   go mod tidy

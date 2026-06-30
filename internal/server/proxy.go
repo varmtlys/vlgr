@@ -7,8 +7,13 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"vlgr/internal/protocol"
+)
+
+const (
+	relayIdleTimeout = 5 * time.Minute
 )
 
 type ReverseProxy struct {
@@ -34,14 +39,15 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, protocol.MaxBodySize))
+	r.Body = http.MaxBytesReader(w, r.Body, protocol.MaxBodySize)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "failed to read request body", http.StatusInternalServerError)
+		http.Error(w, "request body too large or read error", http.StatusRequestEntityTooLarge)
 		return
 	}
 	r.Body.Close()
 
-	log.Printf("[proxy] received %s %s (body: %d bytes)", r.Method, r.URL.RequestURI(), len(body))
+	log.Printf("[proxy] received %s %s (body: %d bytes)", r.Method, r.URL.EscapedPath(), len(body))
 
 	if p.debug {
 		log.Printf("[debug] request headers:")
@@ -67,18 +73,23 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	headers["Host"] = []string{r.Host}
 
+	requestPath := r.URL.EscapedPath()
+	if r.URL.RawQuery != "" {
+		requestPath += "?" + r.URL.RawQuery
+	}
+
 	req := protocol.HTTPRequest{
 		Method:  r.Method,
-		Path:    r.URL.RequestURI(),
+		Path:    requestPath,
 		Headers: headers,
 		Body:    body,
 	}
 
 	var streamData chan []byte
 	if protocol.IsWebSocketUpgrade(r) {
-		streamData = make(chan []byte, 256)
+		streamData = make(chan []byte, streamRelayBuf)
 		if p.debug {
-			log.Printf("[debug] WebSocket upgrade detected for %s", r.URL.RequestURI())
+			log.Printf("[debug] WebSocket upgrade detected for %s", requestPath)
 		}
 	}
 
@@ -88,13 +99,25 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tunnel error", http.StatusBadGateway)
 		return
 	}
-	defer cleanup()
+	defer func() {
+		if cleanup != nil {
+			cleanup()
+		}
+	}()
 
 	if streamData == nil {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		for key, values := range resp.Headers {
+			if !validHeaderName(key) {
+				log.Printf("[proxy] dropping response header with invalid name: %q", key)
+				continue
+			}
 			for _, value := range values {
+				if !validHeaderValue(value) {
+					log.Printf("[proxy] dropping response header %q with invalid value (CRLF?)", key)
+					continue
+				}
 				w.Header().Add(key, value)
 			}
 		}
@@ -119,15 +142,27 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
 	for key, values := range resp.Headers {
+		if !validHeaderName(key) {
+			log.Printf("[proxy] dropping response header with invalid name: %q", key)
+			continue
+		}
 		for _, value := range values {
+			if !validHeaderValue(value) {
+				log.Printf("[proxy] dropping response header %q with invalid value (CRLF?)", key)
+				continue
+			}
 			bufrw.WriteString(fmt.Sprintf("%s: %s\r\n", key, value))
 		}
 	}
 	bufrw.WriteString("\r\n")
-	bufrw.Flush()
+	if err := bufrw.Flush(); err != nil {
+		log.Printf("[proxy] flush error for %s: %v", subdomain, err)
+		conn.Close()
+		return
+	}
 
 	if p.debug {
-		log.Printf("[debug] WebSocket relay started for %s (request #%d)", r.URL.RequestURI(), resp.StatusCode)
+		log.Printf("[debug] WebSocket relay started for %s (request #%d)", requestPath, resp.StatusCode)
 	}
 
 	var wg sync.WaitGroup
@@ -136,12 +171,14 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		buf := make([]byte, protocol.StreamBufSize)
+		conn.SetReadDeadline(time.Now().Add(relayIdleTimeout))
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
 				tunnel.Handler.SendStreamClose(requestID)
 				return
 			}
+			conn.SetReadDeadline(time.Now().Add(relayIdleTimeout))
 			if err := tunnel.Handler.SendStreamData(requestID, buf[:n]); err != nil {
 				tunnel.Handler.SendStreamClose(requestID)
 				return
@@ -152,6 +189,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		for data := range streamData {
+			conn.SetWriteDeadline(time.Now().Add(relayIdleTimeout))
 			if _, err := conn.Write(data); err != nil {
 				return
 			}
@@ -163,8 +201,39 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn.Close()
 
 	if p.debug {
-		log.Printf("[debug] WebSocket relay ended for %s", r.URL.RequestURI())
+		log.Printf("[debug] WebSocket relay ended for %s", requestPath)
 	}
+}
+
+func validHeaderName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == '-' || c == '_' || c == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validHeaderValue(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\r' || c == '\n' {
+			return false
+		}
+		if c == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func extractSubdomain(host, baseDomain string) string {
@@ -182,6 +251,9 @@ func extractSubdomain(host, baseDomain string) string {
 
 	prefix := strings.TrimSuffix(host, suffix)
 	if prefix == "" || strings.Contains(prefix, ".") {
+		return ""
+	}
+	if !validSubdomain(prefix) {
 		return ""
 	}
 	return prefix

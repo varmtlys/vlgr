@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -36,7 +37,10 @@ func (r *Registry) Register(subdomain string, localPort uint16, handler *ClientH
 	}
 
 	idBytes := make([]byte, 8)
-	rand.Read(idBytes)
+	if _, err := rand.Read(idBytes); err != nil {
+		log.Printf("[registry] CRITICAL: crypto/rand failed: %v", err)
+		return nil, fmt.Errorf("crypto/rand failed: %w", err)
+	}
 	t := &Tunnel{
 		ID:        binary.BigEndian.Uint64(idBytes),
 		Subdomain: subdomain,
@@ -62,6 +66,10 @@ func (r *Registry) Get(subdomain string) *Tunnel {
 
 func generateSubdomain() string {
 	b := make([]byte, 8)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		log.Printf("[registry] CRITICAL: crypto/rand failed, using timestamp fallback: %v", err)
+		now := time.Now().UnixNano()
+		return fmt.Sprintf("%016x", now)
+	}
 	return fmt.Sprintf("%x", b)
 }

@@ -3,6 +3,7 @@ package protocol
 import (
 	"bytes"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -394,6 +395,43 @@ func TestEncodeHTTPRequest_NoHeaders(t *testing.T) {
 	}
 	if decoded.Method != "DELETE" {
 		t.Errorf("Method: want DELETE, got %q", decoded.Method)
+	}
+}
+
+func TestReadHeaders_RejectsHugeCount(t *testing.T) {
+	var buf bytes.Buffer
+	binaryWriteTo(&buf, uint32(0xFFFFFFFF))
+	_, err := readHeaders(bytes.NewReader(buf.Bytes()))
+	if err == nil {
+		t.Fatal("expected error for huge count, got nil")
+	}
+	if !strings.Contains(err.Error(), "too many headers") {
+		t.Errorf("expected 'too many headers' error, got: %v", err)
+	}
+}
+
+func TestReadHeaders_RejectsHugeValueCount(t *testing.T) {
+	var buf bytes.Buffer
+	binaryWriteTo(&buf, uint32(1))
+	binaryWriteTo(&buf, uint16(3))
+	buf.WriteString("abc")
+	binaryWriteTo(&buf, uint32(MaxValuesPerHeader+1))
+	_, err := readHeaders(bytes.NewReader(buf.Bytes()))
+	if err == nil {
+		t.Fatal("expected error for huge valueCount")
+	}
+	if !strings.Contains(err.Error(), "too many values") {
+		t.Errorf("expected 'too many values' error, got: %v", err)
+	}
+}
+
+func TestReadString_RejectsOversizedLength(t *testing.T) {
+	var buf bytes.Buffer
+	binaryWriteTo(&buf, uint16(1000))
+	buf.WriteString("short")
+	_, err := readString(bytes.NewReader(buf.Bytes()))
+	if err == nil {
+		t.Fatal("expected error for truncated string")
 	}
 }
 
