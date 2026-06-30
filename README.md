@@ -76,8 +76,8 @@ vlgr/
 │       └── integration_test.go     # 22 E2E tests: live server/client/backend
 │
 ├── scripts/
-│   ├── build.ps1                   # Build for Windows + Linux (PowerShell)
-│   ├── build.sh                    # Build for Linux + Windows (Bash)
+│   ├── build.ps1                   # Cross-compile for all platforms (PowerShell)
+│   ├── build.sh                    # Cross-compile for all platforms (Bash)
 │   └── deploy-server.sh            # One-command auto-deploy for VPS (multi-distro)
 │
 └── docs/

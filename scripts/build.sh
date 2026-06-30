@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 #
 # Build script for Linux (Bash)
-# Cross-compiles VLGR server and client for Linux and Windows.
+# Cross-compiles VLGR server and client for all supported platforms.
 #
 # Usage:
-#   ./scripts/build.sh              # Build both platforms
-#   ./scripts/build.sh --linux-only # Linux only
-#   ./scripts/build.sh --win-only   # Windows only
+#   ./scripts/build.sh                                  # Build all platforms
+#   ./scripts/build.sh -t "linux/amd64"                 # Single platform
+#   ./scripts/build.sh -t "linux/amd64,linux/arm64"     # Specific platforms
+#
+# Available targets: windows/amd64, windows/x86, linux/amd64, linux/x86, linux/arm64, darwin/amd64, darwin/arm64
 #
 # Requires: Go 1.22+ installed and in PATH.
 
@@ -15,21 +17,31 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${PROJECT_ROOT}/build"
-WIN_DIR="${BUILD_DIR}/windows"
-LINUX_DIR="${BUILD_DIR}/linux"
 
-LDFLAGS="-s -w"  # strip debug info, shrink binary
+LDFLAGS="-s -w"
 BUILD_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-WINDOWS_ONLY=false
-LINUX_ONLY=false
+TARGETS_FILTER=""
 
-for arg in "$@"; do
-    case "$arg" in
-        --win-only)   WINDOWS_ONLY=true ;;
-        --linux-only) LINUX_ONLY=true ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -t) TARGETS_FILTER="$2"; shift 2 ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+# All supported targets: OS GoArch Label Ext
+ALL_TARGETS=(
+    "windows amd64 amd64 .exe"
+    "windows 386   x86   .exe"
+    "linux   amd64 amd64"
+    "linux   386   x86"
+    "linux   arm64 arm64"
+    "darwin  amd64 amd64"
+    "darwin  arm64 arm64"
+)
+
+APPS=("vlgr-server:./cmd/server" "vlgr-client:./cmd/client")
 
 # Colors
 RED='\033[0;31m'
@@ -39,41 +51,38 @@ CYAN='\033[0;36m'
 GRAY='\033[0;37m'
 NC='\033[0m'
 
-build_target() {
+build_app() {
     local os="$1"
-    local arch="$2"
-    local out_dir="$3"
+    local goarch="$2"
+    local label="$3"
     local ext="$4"
+    local name="$5"
+    local src="$6"
 
-    export GOOS="$os"
-    export GOARCH="$arch"
-    export CGO_ENABLED=0
+    local suffix
+    if [ -n "$ext" ]; then
+        suffix="${os}-${label}${ext}"
+    else
+        suffix="${os}-${label}"
+    fi
 
-    mkdir -p "$out_dir"
+    local out_name="${name}-${suffix}"
+    local out_path="${BUILD_DIR}/${out_name}"
 
-    local apps=("vlgr-server:./cmd/server" "vlgr-client:./cmd/client")
+    echo -e "${CYAN}[$os/$label] Building $name...${NC}"
 
-    for app_def in "${apps[@]}"; do
-        local name="${app_def%%:*}"
-        local src="${app_def##*:}"
-        local out_name="${name}${ext}"
-        local out_path="${out_dir}/${out_name}"
+    GOOS="$os" GOARCH="$goarch" CGO_ENABLED=0 go build \
+        -trimpath \
+        -ldflags "$LDFLAGS" \
+        -o "$out_path" \
+        "$src" || {
+        echo -e "${RED}  ERROR: Build failed for $name ($os/$label)${NC}"
+        exit 1
+    }
 
-        echo -e "${CYAN}[$os/$arch] Building $name...${NC}"
-
-        go build \
-            -trimpath \
-            -ldflags "$LDFLAGS" \
-            -o "$out_path" \
-            "$src" || {
-            echo -e "${RED}  ERROR: Build failed for $name ($os/$arch)${NC}"
-            exit 1
-        }
-
-        local size
-        size=$(du -h "$out_path" | cut -f1)
-        echo -e "${GREEN}  -> $out_name ($size)${NC}"
-    done
+    local size
+    size=$(du -h "$out_path" | cut -f1)
+    echo -e "${GREEN}  -> $out_name ($size)${NC}"
 }
 
 echo -e "${YELLOW}========================================"
@@ -84,42 +93,45 @@ echo ""
 
 cd "$PROJECT_ROOT"
 
+go_ver=$(go version 2>&1 || true)
+echo -e "${GRAY}Go version: $go_ver${NC}"
+
 echo -e "${CYAN}Downloading dependencies...${NC}"
 go mod tidy
 go mod download
 echo ""
 
-go_ver=$(go version 2>&1 || true)
-echo -e "${GRAY}Go version: $go_ver${NC}"
-echo ""
+for entry in "${ALL_TARGETS[@]}"; do
+    read -r os goarch label ext <<< "$entry"
 
-if ! $LINUX_ONLY; then
-    echo -e "${YELLOW}--- Windows (amd64) ---${NC}"
-    build_target "windows" "amd64" "$WIN_DIR" ".exe"
-    echo ""
-fi
+    if [ -n "$TARGETS_FILTER" ]; then
+        local key="${os}/${label}"
+        # shellcheck disable=SC2076
+        if [[ ! ",${TARGETS_FILTER}," =~ ",${key}," ]]; then
+            continue
+        fi
+    fi
 
-if ! $WINDOWS_ONLY; then
-    echo -e "${YELLOW}--- Linux (amd64) ---${NC}"
-    build_target "linux" "amd64" "$LINUX_DIR" ""
+    echo -e "${YELLOW}--- $os ($label) ---${NC}"
+
+    for app_def in "${APPS[@]}"; do
+        local name="${app_def%%:*}"
+        local src="${app_def##*:}"
+        build_app "$os" "$goarch" "$label" "$ext" "$name" "$src"
+    done
     echo ""
-fi
+done
 
 echo -e "${YELLOW}========================================"
 echo -e "  ${GREEN}Build complete!${YELLOW}"
 echo -e "  Output:${NC}"
 
-for d in "$WIN_DIR" "$LINUX_DIR"; do
-    if [ -d "$d" ]; then
-        echo -e "${GRAY}    $d${NC}"
-        for f in "$d"/*; do
-            if [ -f "$f" ]; then
-                name=$(basename "$f")
-                size=$(du -h "$f" | cut -f1)
-                echo -e "      $name ($size)"
-            fi
-        done
+for f in "$BUILD_DIR"/*; do
+    if [ -f "$f" ]; then
+        local name; name=$(basename "$f")
+        local size; size=$(du -h "$f" | cut -f1)
+        echo -e "    $name ($size)"
     fi
-done
+done | sort
 
 echo -e "${YELLOW}========================================${NC}"
