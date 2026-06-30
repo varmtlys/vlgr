@@ -463,7 +463,8 @@ EnvironmentFile=/etc/vlgr/vlgr-server.conf
 ExecStart=${INSTALL_PATH}/bin/vlgr-server \\
     -addr \${VLGR_WS_ADDR} \\
     -http \${VLGR_HTTP_ADDR} \\
-    -domain \${VLGR_DOMAIN}
+    -domain \${VLGR_DOMAIN} \\
+    -token \${VLGR_TOKEN}
 Restart=always
 RestartSec=5
 TimeoutStopSec=10
