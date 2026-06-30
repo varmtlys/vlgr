@@ -44,8 +44,9 @@ type Tunnel struct {
 
 	mappings map[uint64]uint16
 
-	writeMu sync.Mutex
-	done    chan struct{}
+	writeMu  sync.Mutex
+	done     chan struct{}
+	closeOnce sync.Once
 
 	relays   map[uint64]*streamRelay
 	relaysMu sync.Mutex
@@ -170,7 +171,7 @@ func (t *Tunnel) Connect() error {
 }
 
 func (t *Tunnel) Run() {
-	defer close(t.done)
+	defer t.closeOnce.Do(func() { close(t.done) })
 	defer t.conn.Close()
 
 	conn := t.conn
@@ -557,7 +558,9 @@ func (t *Tunnel) sendHTTPError(tunnelID, requestID uint64, statusCode uint16, ms
 }
 
 func (t *Tunnel) Close() {
-	close(t.done)
+	t.closeOnce.Do(func() {
+		close(t.done)
+	})
 	if t.conn != nil {
 		t.writeFrame(protocol.Frame{
 			Type: protocol.MsgCloseTunnel,

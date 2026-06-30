@@ -46,7 +46,8 @@ type ClientHandler struct {
 	mu      sync.Mutex
 	writeMu sync.Mutex
 
-	done chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain string, expectedToken string, debug bool) *ClientHandler {
@@ -389,7 +390,7 @@ func (h *ClientHandler) cleanup() {
 	}
 	h.mu.Unlock()
 
-	close(h.done)
+	h.closeOnce.Do(func() { close(h.done) })
 	if h.conn != nil {
 		h.conn.Close()
 	}
