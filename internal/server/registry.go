@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"sync"
 	"time"
@@ -18,13 +19,11 @@ type Tunnel struct {
 type Registry struct {
 	mu      sync.RWMutex
 	tunnels map[string]*Tunnel
-	nextID  uint64
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
 		tunnels: make(map[string]*Tunnel),
-		nextID:  1,
 	}
 }
 
@@ -36,14 +35,15 @@ func (r *Registry) Register(subdomain string, localPort uint16, handler *ClientH
 		return nil, fmt.Errorf("subdomain %q already taken", subdomain)
 	}
 
+	idBytes := make([]byte, 8)
+	rand.Read(idBytes)
 	t := &Tunnel{
-		ID:        r.nextID,
+		ID:        binary.BigEndian.Uint64(idBytes),
 		Subdomain: subdomain,
 		LocalPort: localPort,
 		Handler:   handler,
 		CreatedAt: time.Now(),
 	}
-	r.nextID++
 	r.tunnels[subdomain] = t
 	return t, nil
 }
@@ -61,7 +61,7 @@ func (r *Registry) Get(subdomain string) *Tunnel {
 }
 
 func generateSubdomain() string {
-	b := make([]byte, 4)
+	b := make([]byte, 8)
 	rand.Read(b)
 	return fmt.Sprintf("%x", b)
 }

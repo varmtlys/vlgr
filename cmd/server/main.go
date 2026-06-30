@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/gorilla/websocket"
 
@@ -19,9 +20,18 @@ var (
 	debug    = flag.Bool("debug", false, "Enable verbose debug logging")
 )
 
+const maxConns = 1000
+
+var connSem = make(chan struct{}, maxConns)
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return true
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		return strings.HasPrefix(origin, "https://"+r.Host) ||
+			strings.HasPrefix(origin, "http://"+r.Host)
 	},
 }
 
@@ -37,6 +47,14 @@ func main() {
 	proxy := server.NewReverseProxy(registry, baseDomain, *debug)
 
 	http.HandleFunc("/_tunnel", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case connSem <- struct{}{}:
+			defer func() { <-connSem }()
+		default:
+			http.Error(w, "too many connections", http.StatusServiceUnavailable)
+			return
+		}
+
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			log.Printf("[server] WebSocket upgrade error: %v", err)

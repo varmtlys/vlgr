@@ -165,12 +165,14 @@ ensure_go() {
   log "Installing Go 1.22+..."
   local go_ver="1.22.5"
   local go_tar="go${go_ver}.linux-amd64.tar.gz"
+  local go_sha="9a6baf11ae4b72b70dfa8a863235ac3d6f4aa3c1d82b0f3cd87a07957b9715c6"
 
   if is_alpine; then
     install_packages go
   elif is_ubuntu || is_debian || is_rhel; then
     install_packages wget
     wget -q "https://go.dev/dl/${go_tar}" -O "/tmp/${go_tar}"
+    echo "${go_sha}  /tmp/${go_tar}" | sha256sum -c --status || { err "Go SHA256 mismatch"; exit 1; }
     tar -C /usr/local -xzf "/tmp/${go_tar}"
     rm "/tmp/${go_tar}"
     if ! grep -q '/usr/local/go/bin' /etc/profile; then
@@ -186,6 +188,7 @@ ensure_go() {
   else
     install_packages wget
     wget -q "https://go.dev/dl/${go_tar}" -O "/tmp/${go_tar}"
+    echo "${go_sha}  /tmp/${go_tar}" | sha256sum -c --status || { err "Go SHA256 mismatch"; exit 1; }
     tar -C /usr/local -xzf "/tmp/${go_tar}"
     export PATH="$PATH:/usr/local/go/bin"
   fi
@@ -354,7 +357,13 @@ ProtectHome=yes
 ReadWritePaths=${INSTALL_PATH}/logs
 CapabilityBoundingSet=
 AmbientCapabilities=
-
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallFilter=@network-io @system-service
 [Install]
 WantedBy=multi-user.target
 SERVICE

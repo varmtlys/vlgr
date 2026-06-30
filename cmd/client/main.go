@@ -15,7 +15,7 @@ import (
 var (
 	serverAddr = flag.String("server", "localhost:4443", "Tunnel server address")
 	localPorts = flag.String("local", "", "Local ports to expose, comma-separated (e.g. '8080,3000')")
-	token      = flag.String("token", "vlgr-token", "Authentication token")
+	token      = flag.String("token", "", "Authentication token")
 	subdomains = flag.String("subdomain", "", "Request custom subdomains, comma-separated (order matches -local)")
 	useTLS     = flag.Bool("tls", false, "Use WSS (TLS) — required when connecting via Caddy/HTTPS")
 	debug      = flag.Bool("debug", false, "Enable verbose debug logging")

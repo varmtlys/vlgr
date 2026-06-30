@@ -91,6 +91,8 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer cleanup()
 
 	if streamData == nil {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
 		for key, values := range resp.Headers {
 			for _, value := range values {
 				w.Header().Add(key, value)
@@ -141,6 +143,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err := tunnel.Handler.SendStreamData(requestID, buf[:n]); err != nil {
+				tunnel.Handler.SendStreamClose(requestID)
 				return
 			}
 		}
@@ -153,6 +156,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		conn.Close()
 	}()
 
 	wg.Wait()

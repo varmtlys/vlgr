@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -64,6 +65,7 @@ func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain strin
 func (h *ClientHandler) Run() {
 	defer h.cleanup()
 
+	h.conn.SetReadLimit(protocol.MaxBodySize + protocol.HeaderSize)
 	h.conn.SetReadDeadline(time.Now().Add(pongWait))
 	h.conn.SetPongHandler(func(string) error {
 		h.conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -133,7 +135,10 @@ func (h *ClientHandler) pingLoop() {
 		case <-ticker.C:
 			h.writeMu.Lock()
 			h.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			h.conn.WriteMessage(websocket.PingMessage, nil)
+			if err := h.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				h.writeMu.Unlock()
+				return
+			}
 			h.writeMu.Unlock()
 		case <-h.done:
 			return
@@ -142,7 +147,7 @@ func (h *ClientHandler) pingLoop() {
 }
 
 func (h *ClientHandler) handleAuth(frame protocol.Frame) {
-	if h.expectedToken != "" && string(frame.Payload) != h.expectedToken {
+	if h.expectedToken != "" && subtle.ConstantTimeCompare([]byte(h.expectedToken), frame.Payload) != 1 {
 		log.Printf("[handler] auth rejected: invalid token")
 		h.writeMessage(protocol.MsgAuthErr, 0, 0, []byte("invalid token"))
 		return
@@ -159,15 +164,29 @@ func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 	}
 
 	localPort := binary.BigEndian.Uint16(frame.Payload[:2])
+	if localPort == 0 {
+		h.writeError(0, "invalid port: 0")
+		return
+	}
 	requestedSubdomain := ""
 	if len(frame.Payload) >= 3 {
 		n := int(frame.Payload[2])
+		if n > 63 {
+			h.writeError(0, "subdomain too long")
+			return
+		}
 		if len(frame.Payload) >= 3+n {
 			requestedSubdomain = string(frame.Payload[3 : 3+n])
 		}
 	}
 	if requestedSubdomain == "" {
 		requestedSubdomain = generateSubdomain()
+	}
+
+	publicURL := fmt.Sprintf("%s.%s", requestedSubdomain, h.baseDomain)
+	if len(publicURL) > 255 {
+		h.writeMessage(protocol.MsgRegisterErr, 0, 0, []byte("public URL too long"))
+		return
 	}
 
 	tunnel, err := h.registry.Register(requestedSubdomain, localPort, h)
@@ -178,7 +197,6 @@ func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 
 	h.tunnels[tunnel.ID] = tunnel
 
-	publicURL := fmt.Sprintf("%s.%s", requestedSubdomain, h.baseDomain)
 	respPayload := append([]byte{byte(len(publicURL))}, []byte(publicURL)...)
 	tunnelIDBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(tunnelIDBytes, tunnel.ID)
@@ -232,7 +250,11 @@ func (h *ClientHandler) handleStreamData(frame protocol.Frame) {
 	}
 
 	func() {
-		defer func() { recover() }()
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[handler] panic in handleStreamData: %v", r)
+			}
+		}()
 		select {
 		case pr.streamData <- frame.Payload:
 		case <-pr.done:
@@ -243,6 +265,9 @@ func (h *ClientHandler) handleStreamData(frame protocol.Frame) {
 func (h *ClientHandler) handleStreamClose(frame protocol.Frame) {
 	h.mu.Lock()
 	pr, ok := h.pending[frame.RequestID]
+	if ok {
+		delete(h.pending, frame.RequestID)
+	}
 	h.mu.Unlock()
 
 	if !ok || pr.streamData == nil {
@@ -333,6 +358,10 @@ func (h *ClientHandler) writeMessage(msgType byte, tunnelID, requestID uint64, p
 		Payload:   payload,
 	})
 
+	if h.conn == nil {
+		return fmt.Errorf("no connection")
+	}
+
 	h.writeMu.Lock()
 	defer h.writeMu.Unlock()
 
@@ -349,6 +378,19 @@ func (h *ClientHandler) cleanup() {
 		h.registry.Unregister(tunnel.Subdomain)
 		log.Printf("[handler] tunnel %s unregistered", tunnel.Subdomain)
 	}
+
+	h.mu.Lock()
+	for id, pr := range h.pending {
+		if pr.streamData != nil {
+			close(pr.streamData)
+		}
+		close(pr.done)
+		delete(h.pending, id)
+	}
+	h.mu.Unlock()
+
 	close(h.done)
-	h.conn.Close()
+	if h.conn != nil {
+		h.conn.Close()
+	}
 }

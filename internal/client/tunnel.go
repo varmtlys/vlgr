@@ -82,6 +82,7 @@ func (t *Tunnel) Connect() error {
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", url, err)
 	}
+	conn.SetReadLimit(protocol.MaxBodySize + protocol.HeaderSize)
 	t.conn = conn
 
 	authFrame := protocol.EncodeFrame(protocol.Frame{
@@ -169,9 +170,11 @@ func (t *Tunnel) Connect() error {
 }
 
 func (t *Tunnel) Run() {
+	defer close(t.done)
 	defer t.conn.Close()
 
 	conn := t.conn
+	conn.SetReadLimit(protocol.MaxBodySize + protocol.HeaderSize)
 	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	conn.SetPongHandler(func(string) error {
 		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -259,7 +262,10 @@ func (t *Tunnel) pingLoop() {
 		case <-ticker.C:
 			t.writeMu.Lock()
 			t.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			t.conn.WriteMessage(websocket.PingMessage, nil)
+			if err := t.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				t.writeMu.Unlock()
+				return
+			}
 			t.writeMu.Unlock()
 		case <-t.done:
 			return
@@ -267,14 +273,9 @@ func (t *Tunnel) pingLoop() {
 	}
 }
 
-func (t *Tunnel) portFor(tunnelID uint64) uint16 {
-	if port, ok := t.mappings[tunnelID]; ok {
-		return port
-	}
-	if len(t.ports) > 0 {
-		return t.ports[0]
-	}
-	return 0
+func (t *Tunnel) portFor(tunnelID uint64) (uint16, bool) {
+	port, ok := t.mappings[tunnelID]
+	return port, ok
 }
 
 func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
@@ -306,7 +307,12 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 }
 
 func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HTTPRequest) {
-	localPort := t.portFor(tunnelID)
+	localPort, ok := t.portFor(tunnelID)
+	if !ok {
+		log.Printf("[client] unknown tunnel ID %d", tunnelID)
+		t.sendHTTPError(tunnelID, requestID, 502, fmt.Sprintf("unknown tunnel %d", tunnelID))
+		return
+	}
 	log.Printf("[client] proxying %s %s -> localhost:%d (body: %d bytes)", req.Method, req.Path, localPort, len(req.Body))
 
 	if t.debug {
@@ -396,7 +402,12 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 }
 
 func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTTPRequest) {
-	localPort := t.portFor(tunnelID)
+	localPort, ok := t.portFor(tunnelID)
+	if !ok {
+		log.Printf("[client] unknown tunnel ID %d for WebSocket", tunnelID)
+		t.sendHTTPError(tunnelID, requestID, 502, fmt.Sprintf("unknown tunnel %d", tunnelID))
+		return
+	}
 	log.Printf("[client] WebSocket upgrade: %s %s -> localhost:%d (%d bytes headers payload)", req.Method, req.Path, localPort, len(req.Headers))
 
 	addr := fmt.Sprintf("localhost:%d", localPort)

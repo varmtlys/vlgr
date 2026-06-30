@@ -63,6 +63,9 @@ func DecodeFrame(data []byte) (Frame, error) {
 		return Frame{}, fmt.Errorf("frame too short: %d bytes, need at least %d", len(data), HeaderSize)
 	}
 	payloadLen := binary.BigEndian.Uint32(data[17:21])
+	if payloadLen > MaxBodySize {
+		return Frame{}, fmt.Errorf("frame payload exceeds max: %d > %d", payloadLen, MaxBodySize)
+	}
 	if len(data) < HeaderSize+int(payloadLen) {
 		return Frame{}, fmt.Errorf("truncated payload: expected %d, got %d", payloadLen, len(data)-HeaderSize)
 	}
@@ -169,6 +172,9 @@ func DecodeHTTPRequest(data []byte) (HTTPRequest, error) {
 	if err := binary.Read(reader, binary.BigEndian, &bodyLen); err != nil {
 		return req, fmt.Errorf("read body length: %w", err)
 	}
+	if bodyLen > MaxBodySize {
+		return req, fmt.Errorf("body too large: %d > %d", bodyLen, MaxBodySize)
+	}
 	req.Body = make([]byte, bodyLen)
 	if _, err := io.ReadFull(reader, req.Body); err != nil {
 		return req, fmt.Errorf("read body: %w", err)
@@ -205,6 +211,9 @@ func DecodeHTTPResponse(data []byte) (HTTPResponse, error) {
 	var bodyLen uint32
 	if err := binary.Read(reader, binary.BigEndian, &bodyLen); err != nil {
 		return resp, fmt.Errorf("read body length: %w", err)
+	}
+	if bodyLen > MaxBodySize {
+		return resp, fmt.Errorf("body too large: %d > %d", bodyLen, MaxBodySize)
 	}
 	resp.Body = make([]byte, bodyLen)
 	if _, err := io.ReadFull(reader, resp.Body); err != nil {
