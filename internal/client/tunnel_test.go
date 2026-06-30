@@ -12,9 +12,9 @@ import (
 )
 
 func TestNewTunnel(t *testing.T) {
-	tun := NewTunnel("example.com:4443", "token123", []uint16{3000}, nil, true)
-	if tun.serverAddr != "example.com:4443" {
-		t.Errorf("serverAddr: want example.com:4443, got %q", tun.serverAddr)
+	tun := NewTunnel("domain.com:4443", "token123", []uint16{3000}, nil, true)
+	if tun.serverAddr != "domain.com:4443" {
+		t.Errorf("serverAddr: want domain.com:4443, got %q", tun.serverAddr)
 	}
 	if tun.token != "token123" {
 		t.Errorf("token: want token123, got %q", tun.token)
@@ -287,7 +287,7 @@ func TestIsWebSocketUpgradeReq_Client(t *testing.T) {
 	}
 
 	req2 := protocol.HTTPRequest{
-		Headers: map[string][]string{"Host": {"example.com"}},
+		Headers: map[string][]string{"Host": {"domain.com"}},
 	}
 	if protocol.IsWebSocketUpgradeReq(req2) {
 		t.Error("should not detect WebSocket upgrade")

@@ -251,7 +251,7 @@ func TestIsWebSocketUpgradeReq(t *testing.T) {
 	}{
 		{"websocket upgrade", map[string][]string{"Upgrade": {"websocket"}}, true},
 		{"mixed case key", map[string][]string{"upgrade": {"websocket"}}, true},
-		{"no upgrade header", map[string][]string{"Host": {"example.com"}}, false},
+		{"no upgrade header", map[string][]string{"Host": {"domain.com"}}, false},
 		{"other value", map[string][]string{"Upgrade": {"h2c"}}, false},
 	}
 	for _, tt := range tests {

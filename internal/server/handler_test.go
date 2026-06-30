@@ -53,7 +53,7 @@ func TestHandleRegister_InvalidPayload(t *testing.T) {
 		registry:      NewRegistry(),
 		tunnels:       make(map[uint64]*Tunnel),
 		pending:       make(map[uint64]*pendingReq),
-		baseDomain:    "tunnel.example.com",
+		baseDomain:    "tunnel.domain.com",
 		done:          make(chan struct{}),
 	}
 
@@ -68,7 +68,7 @@ func TestHandleRegister_PortZero(t *testing.T) {
 		registry:      NewRegistry(),
 		tunnels:       make(map[uint64]*Tunnel),
 		pending:       make(map[uint64]*pendingReq),
-		baseDomain:    "tunnel.example.com",
+		baseDomain:    "tunnel.domain.com",
 		done:          make(chan struct{}),
 	}
 
@@ -84,7 +84,7 @@ func TestHandleRegister_SubdomainTooLong(t *testing.T) {
 		registry:      NewRegistry(),
 		tunnels:       make(map[uint64]*Tunnel),
 		pending:       make(map[uint64]*pendingReq),
-		baseDomain:    "tunnel.example.com",
+		baseDomain:    "tunnel.domain.com",
 		done:          make(chan struct{}),
 	}
 
@@ -125,7 +125,7 @@ func TestHandleRegister_Success(t *testing.T) {
 		registry:      r,
 		tunnels:       make(map[uint64]*Tunnel),
 		pending:       make(map[uint64]*pendingReq),
-		baseDomain:    "tunnel.example.com",
+		baseDomain:    "tunnel.domain.com",
 		done:          make(chan struct{}),
 	}
 
@@ -151,7 +151,7 @@ func TestHandleRegister_WithSubdomain(t *testing.T) {
 		registry:      r,
 		tunnels:       make(map[uint64]*Tunnel),
 		pending:       make(map[uint64]*pendingReq),
-		baseDomain:    "tunnel.example.com",
+		baseDomain:    "tunnel.domain.com",
 		done:          make(chan struct{}),
 	}
 
@@ -579,7 +579,7 @@ func TestHandleRegister_SubdomainEmpty(t *testing.T) {
 		registry:      r,
 		tunnels:       make(map[uint64]*Tunnel),
 		pending:       make(map[uint64]*pendingReq),
-		baseDomain:    "tunnel.example.com",
+		baseDomain:    "tunnel.domain.com",
 		done:          make(chan struct{}),
 	}
 

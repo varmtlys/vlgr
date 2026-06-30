@@ -16,7 +16,7 @@ func TestExtractSubdomain(t *testing.T) {
 		{"base with port", "abc123.tunnel.domain.com", "tunnel.domain.com:8080", "abc123"},
 		{"both ports", "abc123.tunnel.domain.com:443", "tunnel.domain.com:8080", "abc123"},
 		{"localhost", "a1b2.localhost:8080", "localhost:8080", "a1b2"},
-		{"single label base", "sub.example.com", "example.com", "sub"},
+		{"single label base", "sub.domain.com", "domain.com", "sub"},
 		{"no subdomain", "tunnel.domain.com", "tunnel.domain.com", ""},
 		{"wrong domain", "abc.other.com", "tunnel.domain.com", ""},
 		{"multi-level subdomain", "deep.sub.tunnel.domain.com", "tunnel.domain.com", ""},
