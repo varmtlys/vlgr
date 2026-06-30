@@ -290,17 +290,42 @@ Type=simple
 User=nobody
 Group=nogroup
 WorkingDirectory=/opt/vlgr
-ExecStart=/opt/vlgr/vlgr-server -addr 127.0.0.1:4443 -http 127.0.0.1:8080 -domain tunnel.domain.com
+EnvironmentFile=/etc/vlgr/vlgr-server.conf
+ExecStart=/opt/vlgr/vlgr-server -addr ${VLGR_WS_ADDR} -http ${VLGR_HTTP_ADDR} -domain ${VLGR_DOMAIN}
 Restart=always
 RestartSec=5
+TimeoutStopSec=10
 
 NoNewPrivileges=yes
+PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/opt/vlgr
+ReadWritePaths=/opt/vlgr/logs
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallFilter=@network-io @system-service
 
 [Install]
 WantedBy=multi-user.target
+```
+
+Create the config file `/etc/vlgr/vlgr-server.conf`:
+
+```bash
+sudo mkdir -p /etc/vlgr
+sudo tee /etc/vlgr/vlgr-server.conf << 'EOF'
+VLGR_DOMAIN="tunnel.domain.com"
+VLGR_WS_ADDR="127.0.0.1:4443"
+VLGR_HTTP_ADDR="127.0.0.1:8080"
+VLGR_TOKEN="your-secret-token"
+EOF
+sudo chmod 600 /etc/vlgr/vlgr-server.conf
 ```
 
 Deploy:

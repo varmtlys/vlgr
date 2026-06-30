@@ -39,7 +39,9 @@ You run a web server on `localhost:3000`. No public IP, behind NAT. VLGR exposes
                                                  └───────────────────┘
 ```
 
-The client opens a persistent WebSocket to the server. The server assigns a unique public URL for each port (e.g., `a3f8b2c1.tunnel.domain.com`). A single client connection can expose multiple local ports — each gets its own subdomain and TunnelID. When an external user hits a public URL, the server serializes the HTTP request into a binary frame (tagged with the corresponding TunnelID), sends it to the client over WebSocket. The client looks up the local port by TunnelID, forwards the request to the correct `localhost:<port>`, serializes the response, and sends it back. The server returns the response to the external user — who sees a normal HTTP exchange.
+The client opens a persistent WebSocket to the server. The server assigns a unique public URL for each port (e.g., `a3f8b2c1d4e5f6a7.tunnel.domain.com`). A single client connection can expose multiple local ports — each gets its own subdomain and TunnelID. When an external user hits a public URL, the server serializes the HTTP request into a binary frame (tagged with the corresponding TunnelID), sends it to the client over WebSocket. The client looks up the local port by TunnelID, forwards the request to the correct `localhost:<port>`, serializes the response, and sends it back. The server returns the response to the external user — who sees a normal HTTP exchange.
+
+WebSocket upgrades are fully proxied via TCP hijacking and `MsgStreamData`/`MsgStreamClose` frames, enabling bidirectional real-time communication.
 
 ---
 
@@ -57,13 +59,21 @@ vlgr/
 │   └── client/main.go              # Client entry point
 │
 ├── internal/
-│   ├── protocol/protocol.go        # Binary protocol: framing, HTTP serialization
+│   ├── protocol/
+│   │   ├── protocol.go             # Binary protocol: framing, HTTP serialization
+│   │   └── protocol_test.go        # 22 unit tests: frames, HTTP serde, WS detection
 │   ├── server/
 │   │   ├── registry.go             # Tunnel registry (subdomain → Tunnel)
+│   │   ├── registry_test.go        # 10 tests: register, get, unregister, concurrency
 │   │   ├── handler.go              # Client WebSocket handler
-│   │   └── proxy.go                # Reverse proxy for incoming HTTP
-│   └── client/
-│       └── tunnel.go               # Client logic: connect, register, proxy
+│   │   ├── handler_test.go         # 18 tests: auth, registration, frame dispatch
+│   │   ├── proxy.go                # Reverse proxy for incoming HTTP
+│   │   └── proxy_test.go           # 2 tests: subdomain extraction (16 cases)
+│   ├── client/
+│   │   ├── tunnel.go               # Client logic: connect, register, proxy
+│   │   └── tunnel_test.go          # 16 tests: routing, WS relay, error paths
+│   └── integration/
+│       └── integration_test.go     # 22 E2E tests: live server/client/backend
 │
 ├── scripts/
 │   ├── build.ps1                   # Build for Windows + Linux (PowerShell)
@@ -153,9 +163,10 @@ type Tunnel struct {
 type Registry struct {
     mu      sync.RWMutex
     tunnels map[string]*Tunnel
-    nextID  uint64
 }
 ```
+
+Tunnel IDs are cryptographically random (`crypto/rand`), not sequential. Subdomains use 8 random bytes (16 hex chars) for 2^64 namespace.
 
 ### 2. ClientHandler (`internal/server/handler.go`)
 
@@ -168,7 +179,7 @@ Handles one client WebSocket connection. Each connected client gets its own inst
    - Sets read deadlines, registers Pong handler.
    - Starts `pingLoop` goroutine (sends WebSocket Ping every 30s).
    - Reads binary messages, decodes frames, dispatches by type.
-3. `handleAuth` — accepts any token, replies `MsgAuthOK`.
+3. `handleAuth` — validates token via constant-time comparison (`crypto/subtle`), rejects invalid tokens with `MsgAuthErr`.
 4. `handleRegister` — reads port from payload, registers tunnel, replies with public URL.
 5. `handleHTTPRes` — receives response from client, routes to awaiting `ForwardHTTP` via channel.
 
@@ -178,13 +189,14 @@ Multiple HTTP requests flow over a single WebSocket connection simultaneously:
 
 ```go
 type pendingReq struct {
-    response chan protocol.HTTPResponse
-    done     chan struct{}
+    response   chan protocol.HTTPResponse
+    streamData chan []byte
+    done       chan struct{}
 }
 // pending map[uint64]*pendingReq  — RequestID → awaiting request
 ```
 
-`ForwardHTTP` generates a unique `requestID`, inserts a `pendingReq` into the map, writes `MsgHTTPReq` to WebSocket, then blocks on the response channel (30s timeout). When `MsgHTTPRes` arrives, `handleHTTPRes` finds the entry and delivers the response.
+`ForwardHTTP` generates a unique `requestID`, inserts a `pendingReq` into the map, writes `MsgHTTPReq` to WebSocket, then blocks on the response channel (30s timeout). When `MsgHTTPRes` arrives, `handleHTTPRes` finds the entry and delivers the response. For WebSocket upgrades, `streamData` provides a channel for bidirectional data relay.
 
 ### 3. ReverseProxy (`internal/server/proxy.go`)
 
@@ -309,6 +321,8 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 | `-addr` | `:4443` | WebSocket listen address for tunnel clients |
 | `-http` | `:8080` | HTTP listen address for public traffic |
 | `-domain` | `localhost:8080` | Base domain for tunnel URLs (e.g. `tunnel.domain.com`) |
+| `-token` | `""` | Auth token for clients (empty = no auth, or set `VLGR_TOKEN` env) |
+| `-debug` | `false` | Enable verbose debug logging |
 
 ### Client (`cmd/client`)
 
@@ -316,7 +330,7 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 |---|---|---|
 | `-server` | `localhost:4443` | VLGR server address |
 | `-local` | **required** | Local port(s) to expose, comma-separated (e.g. `3000` or `8080,3000`) |
-| `-token` | `vlgr-token` | Authentication token |
+| `-token` | `""` | Authentication token (required when server has `-token` set) |
 | `-subdomain` | auto | Request custom subdomain(s), comma-separated — order matches `-local` |
 | `-tls` | `false` | Use WSS (TLS) — required when connecting via Caddy/HTTPS |
 | `-debug` | `false` | Enable verbose debug logging |
