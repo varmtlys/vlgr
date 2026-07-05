@@ -12,9 +12,7 @@ import (
 type Tunnel struct {
 	ID        uint64
 	Subdomain string
-	LocalPort uint16
 	Handler   *ClientHandler
-	CreatedAt time.Time
 }
 
 type Registry struct {
@@ -28,7 +26,7 @@ func NewRegistry() *Registry {
 	}
 }
 
-func (r *Registry) Register(subdomain string, localPort uint16, handler *ClientHandler) (*Tunnel, error) {
+func (r *Registry) Register(subdomain string, handler *ClientHandler) (*Tunnel, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -44,9 +42,7 @@ func (r *Registry) Register(subdomain string, localPort uint16, handler *ClientH
 	t := &Tunnel{
 		ID:        binary.BigEndian.Uint64(idBytes),
 		Subdomain: subdomain,
-		LocalPort: localPort,
 		Handler:   handler,
-		CreatedAt: time.Now(),
 	}
 	r.tunnels[subdomain] = t
 	return t, nil

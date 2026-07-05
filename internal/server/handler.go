@@ -3,7 +3,6 @@ package server
 import (
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/binary"
 	"fmt"
 	"log"
 	"sync"
@@ -107,11 +106,7 @@ func (h *ClientHandler) Run() {
 		if err != nil {
 			log.Printf("[handler] decode error: %v (%d bytes)", err, len(msg))
 			if h.debug && len(msg) > 0 {
-				preview := len(msg)
-				if preview > 128 {
-					preview = 128
-				}
-				log.Printf("[debug] raw frame hex: %x", msg[:preview])
+				log.Printf("[debug] raw frame hex: %s", protocol.HexPreview(msg, 128))
 			}
 			continue
 		}
@@ -147,22 +142,7 @@ func (h *ClientHandler) handleFrame(frame protocol.Frame) {
 }
 
 func (h *ClientHandler) pingLoop() {
-	ticker := time.NewTicker(protocol.PingPeriod)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			h.writeMu.Lock()
-			h.conn.SetWriteDeadline(time.Now().Add(protocol.WriteWait))
-			if err := h.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				h.writeMu.Unlock()
-				return
-			}
-			h.writeMu.Unlock()
-		case <-h.done:
-			return
-		}
-	}
+	protocol.PingLoop(h.conn, &h.writeMu, h.done)
 }
 
 func (h *ClientHandler) handleAuth(frame protocol.Frame) {
@@ -181,29 +161,14 @@ func (h *ClientHandler) handleAuth(frame protocol.Frame) {
 }
 
 func (h *ClientHandler) handleRegister(frame protocol.Frame) {
-	if len(frame.Payload) < 2 {
-		h.writeError(0, "invalid register payload")
+	localPort, requestedSubdomain, err := protocol.DecodeRegister(frame.Payload)
+	if err != nil {
+		h.writeMessage(protocol.MsgRegisterErr, 0, 0, []byte(err.Error()))
 		return
 	}
-
-	localPort := binary.BigEndian.Uint16(frame.Payload[:2])
 	if localPort == 0 {
 		h.writeError(0, "invalid port: 0")
 		return
-	}
-
-	requestedSubdomain := ""
-	if len(frame.Payload) >= 3 {
-		n := int(frame.Payload[2])
-		if n > 63 {
-			h.writeError(0, "subdomain too long")
-			return
-		}
-		if len(frame.Payload) < 3+n {
-			h.writeMessage(protocol.MsgRegisterErr, 0, 0, []byte("truncated register payload"))
-			return
-		}
-		requestedSubdomain = string(frame.Payload[3 : 3+n])
 	}
 	if !validSubdomain(requestedSubdomain) {
 		h.writeError(0, "invalid subdomain characters")
@@ -225,7 +190,7 @@ func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 		h.writeError(0, fmt.Sprintf("too many tunnels: max %d per client", protocol.MaxTunnelsPerClient))
 		return
 	}
-	tunnel, err := h.registry.Register(requestedSubdomain, localPort, h)
+	tunnel, err := h.registry.Register(requestedSubdomain, h)
 	if err != nil {
 		h.mu.Unlock()
 		h.writeMessage(protocol.MsgRegisterErr, 0, 0, []byte(err.Error()))
@@ -235,11 +200,8 @@ func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 	h.tunnelCount++
 	h.mu.Unlock()
 
-	respPayload := append([]byte{byte(len(publicURL))}, []byte(publicURL)...)
-	tunnelIDBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(tunnelIDBytes, tunnel.ID)
-	respPayload = append(respPayload, tunnelIDBytes...)
-
+	// URL length validated above, encoding cannot fail.
+	respPayload, _ := protocol.EncodeRegisterOK(publicURL, tunnel.ID)
 	h.writeMessage(protocol.MsgRegisterOK, tunnel.ID, 0, respPayload)
 	log.Printf("[handler] tunnel registered: %s -> localhost:%d", publicURL, localPort)
 }
@@ -249,11 +211,7 @@ func (h *ClientHandler) handleHTTPRes(frame protocol.Frame) {
 	if err != nil {
 		log.Printf("[handler] decode HTTP response error: %v (payload %d bytes)", err, len(frame.Payload))
 		if h.debug && len(frame.Payload) > 0 {
-			preview := len(frame.Payload)
-			if preview > 256 {
-				preview = 256
-			}
-			log.Printf("[debug] response payload hex: %x", frame.Payload[:preview])
+			log.Printf("[debug] response payload hex: %s", protocol.HexPreview(frame.Payload, 256))
 		}
 		return
 	}
@@ -320,7 +278,19 @@ func (h *ClientHandler) handleStreamClose(frame protocol.Frame) {
 	pr.closeStream()
 }
 
-func (h *ClientHandler) ForwardHTTP(tunnelID uint64, req protocol.HTTPRequest, streamData chan []byte) (requestID uint64, resp protocol.HTTPResponse, cleanup func(), err error) {
+// ForwardHTTP relays a regular HTTP request and returns the response.
+func (h *ClientHandler) ForwardHTTP(tunnelID uint64, req protocol.HTTPRequest) (protocol.HTTPResponse, error) {
+	_, resp, _, err := h.forward(tunnelID, req, nil)
+	return resp, err
+}
+
+// ForwardWebSocket relays an upgrade request; the caller must invoke cleanup
+// when the relay ends (it keeps the pending entry alive for stream frames).
+func (h *ClientHandler) ForwardWebSocket(tunnelID uint64, req protocol.HTTPRequest, streamData chan []byte) (requestID uint64, resp protocol.HTTPResponse, cleanup func(), err error) {
+	return h.forward(tunnelID, req, streamData)
+}
+
+func (h *ClientHandler) forward(tunnelID uint64, req protocol.HTTPRequest, streamData chan []byte) (requestID uint64, resp protocol.HTTPResponse, cleanup func(), err error) {
 	requestID = h.nextRequestID()
 
 	if h.debug {

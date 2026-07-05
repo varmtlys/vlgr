@@ -3,7 +3,6 @@ package client
 import (
 	"bufio"
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
@@ -30,10 +29,9 @@ const (
 )
 
 type streamRelay struct {
-	conn      net.Conn
-	requestID uint64
-	done      chan struct{}
-	doneOnce  sync.Once
+	conn     net.Conn
+	done     chan struct{}
+	doneOnce sync.Once
 }
 
 func (r *streamRelay) closeDone() {
@@ -130,11 +128,9 @@ func (t *Tunnel) Connect() error {
 			subdomain = t.subdomains[i]
 		}
 
-		regPayload := make([]byte, 2)
-		binary.BigEndian.PutUint16(regPayload, port)
-		if subdomain != "" {
-			regPayload = append(regPayload, byte(len(subdomain)))
-			regPayload = append(regPayload, []byte(subdomain)...)
+		regPayload, err := protocol.EncodeRegister(port, subdomain)
+		if err != nil {
+			return fmt.Errorf("encode register for port %d: %w", port, err)
 		}
 
 		regFrame := protocol.EncodeFrame(protocol.Frame{
@@ -163,16 +159,10 @@ func (t *Tunnel) Connect() error {
 			return fmt.Errorf("unexpected register response type for port %d: 0x%02x", port, regResp.Type)
 		}
 
-		payload := regResp.Payload
-		if len(payload) < 1 {
-			return fmt.Errorf("register response for port %d too short", port)
+		publicURL, tunnelID, err := protocol.DecodeRegisterOK(regResp.Payload)
+		if err != nil {
+			return fmt.Errorf("register response for port %d: %w", port, err)
 		}
-		urlLen := payload[0]
-		if len(payload) < 1+int(urlLen)+8 {
-			return fmt.Errorf("register response for port %d truncated", port)
-		}
-		publicURL := string(payload[1 : 1+urlLen])
-		tunnelID := binary.BigEndian.Uint64(payload[1+urlLen:])
 		t.mappings[tunnelID] = port
 
 		urls = append(urls, publicURL)
@@ -271,22 +261,7 @@ func (t *Tunnel) handleStreamClose(frame protocol.Frame) {
 }
 
 func (t *Tunnel) pingLoop() {
-	ticker := time.NewTicker(protocol.PingPeriod)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			t.writeMu.Lock()
-			t.conn.SetWriteDeadline(time.Now().Add(protocol.WriteWait))
-			if err := t.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				t.writeMu.Unlock()
-				return
-			}
-			t.writeMu.Unlock()
-		case <-t.done:
-			return
-		}
-	}
+	protocol.PingLoop(t.conn, &t.writeMu, t.done)
 }
 
 func (t *Tunnel) portFor(tunnelID uint64) (uint16, bool) {
@@ -326,16 +301,8 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 	if err != nil {
 		log.Printf("[client] decode HTTP request error: %v (payload %d bytes)", err, len(frame.Payload))
 		if t.debug && len(frame.Payload) > 0 {
-			preview := len(frame.Payload)
-			if preview > 256 {
-				preview = 256
-			}
-			log.Printf("[debug] request payload hex: %x", frame.Payload[:preview])
-			textPreview := string(frame.Payload)
-			if len(textPreview) > 200 {
-				textPreview = textPreview[:200]
-			}
-			log.Printf("[debug] request payload text: %q", textPreview)
+			log.Printf("[debug] request payload hex: %s", protocol.HexPreview(frame.Payload, 256))
+			log.Printf("[debug] request payload text: %q", protocol.TextPreview(frame.Payload, 200))
 		}
 		t.sendHTTPError(frame.TunnelID, frame.RequestID, 502, err.Error())
 		return
@@ -359,18 +326,9 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 	log.Printf("[client] proxying %s %s -> localhost:%d (body: %d bytes)", req.Method, req.Path, localPort, len(req.Body))
 
 	if t.debug {
-		log.Printf("[debug] request headers:")
-		for k, values := range req.Headers {
-			for _, v := range values {
-				log.Printf("[debug]   %s: %s", k, v)
-			}
-		}
+		protocol.DebugLogHeaders("[debug] request", req.Headers)
 		if len(req.Body) > 0 {
-			bodyPreview := string(req.Body)
-			if len(bodyPreview) > 200 {
-				bodyPreview = bodyPreview[:200] + "..."
-			}
-			log.Printf("[debug] request body: %s", bodyPreview)
+			log.Printf("[debug] request body: %s", protocol.TextPreview(req.Body, 200))
 		}
 	}
 
@@ -412,31 +370,15 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 	log.Printf("[client] localhost:%d response: %d %s (%d body bytes)", localPort, statusCode, http.StatusText(int(statusCode)), len(body))
 
 	if t.debug {
-		log.Printf("[debug] response headers:")
-		for k, values := range httpResp.Header {
-			for _, v := range values {
-				log.Printf("[debug]   %s: %s", k, v)
-			}
-		}
+		protocol.DebugLogHeaders("[debug] response", httpResp.Header)
 		if len(body) > 0 {
-			bodyPreview := string(body)
-			if len(bodyPreview) > 200 {
-				bodyPreview = bodyPreview[:200] + "..."
-			}
-			log.Printf("[debug] response body: %s", bodyPreview)
-		}
-	}
-
-	headers := make(map[string][]string)
-	for k, values := range httpResp.Header {
-		if len(values) > 0 {
-			headers[k] = values
+			log.Printf("[debug] response body: %s", protocol.TextPreview(body, 200))
 		}
 	}
 
 	t.writeResponse(tunnelID, requestID, protocol.HTTPResponse{
 		StatusCode: statusCode,
-		Headers:    headers,
+		Headers:    httpResp.Header,
 		Body:       body,
 	})
 }
@@ -490,18 +432,11 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 	conn.SetDeadline(time.Time{})
 
 	statusCode := uint16(httpResp.StatusCode)
-	headers := make(map[string][]string)
-	for k, values := range httpResp.Header {
-		if len(values) > 0 {
-			headers[k] = values
-		}
-	}
-
 	log.Printf("[client] WebSocket response: %d %s", statusCode, http.StatusText(int(statusCode)))
 
 	t.writeResponse(tunnelID, requestID, protocol.HTTPResponse{
 		StatusCode: statusCode,
-		Headers:    headers,
+		Headers:    httpResp.Header,
 		Body:       nil,
 	})
 
@@ -512,9 +447,8 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 	}
 
 	relay := &streamRelay{
-		conn:      conn,
-		requestID: requestID,
-		done:      make(chan struct{}),
+		conn: conn,
+		done: make(chan struct{}),
 	}
 
 	t.relaysMu.Lock()
@@ -551,11 +485,13 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 			return
 		}
 		conn.SetReadDeadline(time.Now().Add(protocol.RelayIdleTimeout))
+		// No copy needed: writeFrame is synchronous and EncodeFrame
+		// copies the payload before buf is reused.
 		if err := t.writeFrame(protocol.Frame{
 			Type:      protocol.MsgStreamData,
 			TunnelID:  tunnelID,
 			RequestID: requestID,
-			Payload:   append([]byte{}, buf[:n]...),
+			Payload:   buf[:n],
 		}); err != nil {
 			return
 		}

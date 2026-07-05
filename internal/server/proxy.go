@@ -47,26 +47,15 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[proxy] received %s %s (body: %d bytes)", r.Method, r.URL.EscapedPath(), len(body))
 
 	if p.debug {
-		log.Printf("[debug] request headers:")
-		for k, values := range r.Header {
-			for _, v := range values {
-				log.Printf("[debug]   %s: %s", k, v)
-			}
-		}
+		protocol.DebugLogHeaders("[debug] request", r.Header)
 		if len(body) > 0 {
-			bodyPreview := string(body)
-			if len(bodyPreview) > 200 {
-				bodyPreview = bodyPreview[:200] + "..."
-			}
-			log.Printf("[debug] request body: %s", bodyPreview)
+			log.Printf("[debug] request body: %s", protocol.TextPreview(body, 200))
 		}
 	}
 
-	headers := make(map[string][]string)
+	headers := make(map[string][]string, len(r.Header)+4)
 	for key, values := range r.Header {
-		if len(values) > 0 {
-			headers[key] = values
-		}
+		headers[key] = values
 	}
 	headers["Host"] = []string{r.Host}
 	headers["X-Forwarded-Host"] = []string{r.Host}
@@ -93,15 +82,23 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Body:    body,
 	}
 
-	var streamData chan []byte
-	if protocol.IsWebSocketUpgrade(r) {
-		streamData = make(chan []byte, protocol.StreamRelayBuf)
-		if p.debug {
-			log.Printf("[debug] WebSocket upgrade detected for %s", requestPath)
+	if !protocol.IsWebSocketUpgrade(r) {
+		resp, err := tunnel.Handler.ForwardHTTP(tunnel.ID, req)
+		if err != nil {
+			log.Printf("[proxy] forward error for %s: %v", subdomain, err)
+			http.Error(w, "tunnel error", http.StatusBadGateway)
+			return
 		}
+		writeNormalResponse(w, resp)
+		return
 	}
 
-	requestID, resp, cleanup, err := tunnel.Handler.ForwardHTTP(tunnel.ID, req, streamData)
+	if p.debug {
+		log.Printf("[debug] WebSocket upgrade detected for %s", requestPath)
+	}
+	streamData := make(chan []byte, protocol.StreamRelayBuf)
+
+	requestID, resp, cleanup, err := tunnel.Handler.ForwardWebSocket(tunnel.ID, req, streamData)
 	if err != nil {
 		log.Printf("[proxy] forward error for %s: %v", subdomain, err)
 		http.Error(w, "tunnel error", http.StatusBadGateway)
@@ -109,17 +106,9 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cleanup()
 
-	if streamData == nil || resp.StatusCode != 101 {
-		copyValidHeaders(resp.Headers, w.Header().Add)
-		// Security defaults only when the app didn't set its own.
-		if w.Header().Get("X-Content-Type-Options") == "" {
-			w.Header().Set("X-Content-Type-Options", "nosniff")
-		}
-		if w.Header().Get("X-Frame-Options") == "" {
-			w.Header().Set("X-Frame-Options", "DENY")
-		}
-		w.WriteHeader(int(resp.StatusCode))
-		w.Write(resp.Body)
+	// The local app rejected the upgrade — relay its response as-is.
+	if resp.StatusCode != 101 {
+		writeNormalResponse(w, resp)
 		return
 	}
 
@@ -190,6 +179,19 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.debug {
 		log.Printf("[debug] WebSocket relay ended for %s", requestPath)
 	}
+}
+
+func writeNormalResponse(w http.ResponseWriter, resp protocol.HTTPResponse) {
+	copyValidHeaders(resp.Headers, w.Header().Add)
+	// Security defaults only when the app didn't set its own.
+	if w.Header().Get("X-Content-Type-Options") == "" {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+	}
+	if w.Header().Get("X-Frame-Options") == "" {
+		w.Header().Set("X-Frame-Options", "DENY")
+	}
+	w.WriteHeader(int(resp.StatusCode))
+	w.Write(resp.Body)
 }
 
 func copyValidHeaders(headers map[string][]string, add func(key, value string)) {

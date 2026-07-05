@@ -260,12 +260,9 @@ func TestForwardHTTP_WriteError(t *testing.T) {
 		Headers: map[string][]string{},
 	}
 
-	_, _, cleanup, err := h.ForwardHTTP(1, req, nil)
+	_, err := h.ForwardHTTP(1, req)
 	if err == nil {
 		t.Error("expected write error (no connection)")
-	}
-	if cleanup != nil {
-		cleanup()
 	}
 }
 
@@ -394,7 +391,7 @@ func TestForwardHTTP_Timeout(t *testing.T) {
 	}
 
 	// ForwardHTTP will fail because no connection exists (write error)
-	_, _, _, err := h.ForwardHTTP(1, req, nil)
+	_, err := h.ForwardHTTP(1, req)
 	if err == nil {
 		t.Error("expected write error (no connection)")
 	}
@@ -587,7 +584,7 @@ func TestForwardHTTP_Success(t *testing.T) {
 	}
 
 	// Will fail because no connection, but tests the write error path
-	_, _, _, err := h.ForwardHTTP(1, req, nil)
+	_, err := h.ForwardHTTP(1, req)
 	if err == nil {
 		t.Error("expected write error")
 	}
@@ -603,16 +600,13 @@ func TestForwardHTTP_TimeoutPath(t *testing.T) {
 	}
 
 	// ForwardHTTP fails on write error, which tests the error cleanup path
-	_, _, cleanup, err := h.ForwardHTTP(1, protocol.HTTPRequest{
+	_, err := h.ForwardHTTP(1, protocol.HTTPRequest{
 		Method:  "GET",
 		Path:    "/",
 		Headers: map[string][]string{},
-	}, nil)
+	})
 	if err == nil {
 		t.Error("expected error")
-	}
-	if cleanup != nil {
-		t.Error("cleanup should be nil on error")
 	}
 	if len(h.pending) != 0 {
 		t.Error("pending should be empty after error cleanup")

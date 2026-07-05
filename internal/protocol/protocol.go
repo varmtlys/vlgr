@@ -5,9 +5,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 const (
@@ -263,8 +267,8 @@ func DecodeHTTPResponse(data []byte) (HTTPResponse, error) {
 	return resp, nil
 }
 
-func IsWebSocketUpgrade(r *http.Request) bool {
-	for _, v := range r.Header["Upgrade"] {
+func containsWebSocket(values []string) bool {
+	for _, v := range values {
 		for _, part := range strings.Split(v, ",") {
 			if strings.EqualFold(strings.TrimSpace(part), "websocket") {
 				return true
@@ -274,17 +278,120 @@ func IsWebSocketUpgrade(r *http.Request) bool {
 	return false
 }
 
+func IsWebSocketUpgrade(r *http.Request) bool {
+	return containsWebSocket(r.Header["Upgrade"])
+}
+
 func IsWebSocketUpgradeReq(req HTTPRequest) bool {
 	for k, values := range req.Headers {
-		if strings.EqualFold(k, "Upgrade") {
-			for _, v := range values {
-				for _, part := range strings.Split(v, ",") {
-					if strings.EqualFold(strings.TrimSpace(part), "websocket") {
-						return true
-					}
-				}
-			}
+		if strings.EqualFold(k, "Upgrade") && containsWebSocket(values) {
+			return true
 		}
 	}
 	return false
+}
+
+// Register payload: [port uint16][subdomainLen byte][subdomain...] (subdomain optional).
+// RegisterOK payload: [urlLen byte][publicURL...][tunnelID uint64].
+// Encoded and decoded here so client and server share one wire-format definition.
+
+const MaxSubdomainLen = 63
+
+func EncodeRegister(port uint16, subdomain string) ([]byte, error) {
+	if len(subdomain) > MaxSubdomainLen {
+		return nil, fmt.Errorf("subdomain too long: %d > %d", len(subdomain), MaxSubdomainLen)
+	}
+	payload := make([]byte, 2, 3+len(subdomain))
+	binary.BigEndian.PutUint16(payload, port)
+	if subdomain != "" {
+		payload = append(payload, byte(len(subdomain)))
+		payload = append(payload, subdomain...)
+	}
+	return payload, nil
+}
+
+func DecodeRegister(payload []byte) (port uint16, subdomain string, err error) {
+	if len(payload) < 2 {
+		return 0, "", fmt.Errorf("register payload too short: %d bytes", len(payload))
+	}
+	port = binary.BigEndian.Uint16(payload[:2])
+	if len(payload) >= 3 {
+		n := int(payload[2])
+		if n > MaxSubdomainLen {
+			return 0, "", fmt.Errorf("subdomain too long: %d > %d", n, MaxSubdomainLen)
+		}
+		if len(payload) < 3+n {
+			return 0, "", fmt.Errorf("truncated register payload")
+		}
+		subdomain = string(payload[3 : 3+n])
+	}
+	return port, subdomain, nil
+}
+
+func EncodeRegisterOK(publicURL string, tunnelID uint64) ([]byte, error) {
+	if len(publicURL) > 255 {
+		return nil, fmt.Errorf("public URL too long: %d > 255", len(publicURL))
+	}
+	payload := make([]byte, 0, 9+len(publicURL))
+	payload = append(payload, byte(len(publicURL)))
+	payload = append(payload, publicURL...)
+	payload = binary.BigEndian.AppendUint64(payload, tunnelID)
+	return payload, nil
+}
+
+func DecodeRegisterOK(payload []byte) (publicURL string, tunnelID uint64, err error) {
+	if len(payload) < 1 {
+		return "", 0, fmt.Errorf("register response too short")
+	}
+	n := int(payload[0])
+	if len(payload) < 1+n+8 {
+		return "", 0, fmt.Errorf("register response truncated")
+	}
+	return string(payload[1 : 1+n]), binary.BigEndian.Uint64(payload[1+n:]), nil
+}
+
+// PingLoop sends WebSocket pings every PingPeriod until done closes or a
+// write fails. Shared by client and server (DRY).
+func PingLoop(conn *websocket.Conn, writeMu *sync.Mutex, done <-chan struct{}) {
+	ticker := time.NewTicker(PingPeriod)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			writeMu.Lock()
+			conn.SetWriteDeadline(time.Now().Add(WriteWait))
+			err := conn.WriteMessage(websocket.PingMessage, nil)
+			writeMu.Unlock()
+			if err != nil {
+				return
+			}
+		case <-done:
+			return
+		}
+	}
+}
+
+// HexPreview and TextPreview truncate payloads for debug logging.
+func HexPreview(b []byte, max int) string {
+	if len(b) > max {
+		b = b[:max]
+	}
+	return fmt.Sprintf("%x", b)
+}
+
+func TextPreview(b []byte, max int) string {
+	if len(b) > max {
+		return string(b[:max]) + "..."
+	}
+	return string(b)
+}
+
+// DebugLogHeaders dumps headers line by line with the given log prefix.
+func DebugLogHeaders(prefix string, headers map[string][]string) {
+	log.Printf("%s headers:", prefix)
+	for k, values := range headers {
+		for _, v := range values {
+			log.Printf("%s   %s: %s", prefix, k, v)
+		}
+	}
 }

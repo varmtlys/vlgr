@@ -207,13 +207,13 @@ ensure_go() {
   fi
 
   log "Installing Go 1.22+..."
-  local go_ver="1.22.5"
-  local go_tar="go${go_ver}.linux-amd64.tar.gz"
-  local go_sha="9a6baf11ae4b72b70dfa8a863235ac3d6f4aa3c1d82b0f3cd87a07957b9715c6"
 
-  if is_alpine; then
+  if is_alpine || is_arch || is_suse || is_void; then
     install_packages go
-  elif is_ubuntu || is_debian || is_rhel; then
+  else
+    local go_ver="1.22.5"
+    local go_tar="go${go_ver}.linux-amd64.tar.gz"
+    local go_sha="9a6baf11ae4b72b70dfa8a863235ac3d6f4aa3c1d82b0f3cd87a07957b9715c6"
     install_packages wget
     wget -q "https://go.dev/dl/${go_tar}" -O "/tmp/${go_tar}"
     echo "${go_sha}  /tmp/${go_tar}" | sha256sum -c --status || { err "Go SHA256 mismatch"; exit 1; }
@@ -222,18 +222,6 @@ ensure_go() {
     if [[ ! -f /etc/profile.d/go.sh ]]; then
       echo 'export PATH=$PATH:/usr/local/go/bin' > /etc/profile.d/go.sh
     fi
-    export PATH="$PATH:/usr/local/go/bin"
-  elif is_arch; then
-    install_packages go
-  elif is_suse; then
-    install_packages go
-  elif is_void; then
-    install_packages go
-  else
-    install_packages wget
-    wget -q "https://go.dev/dl/${go_tar}" -O "/tmp/${go_tar}"
-    echo "${go_sha}  /tmp/${go_tar}" | sha256sum -c --status || { err "Go SHA256 mismatch"; exit 1; }
-    tar -C /usr/local -xzf "/tmp/${go_tar}"
     export PATH="$PATH:/usr/local/go/bin"
   fi
 
@@ -495,27 +483,23 @@ SERVICE
 
 # ─── Install Caddy ────────────────────────────────────────────────────────────
 install_caddy() {
+  download_caddy() {
+    local caddy_ver="2.8.4"
+    install_packages curl
+    curl -sL "https://github.com/caddyserver/caddy/releases/download/v${caddy_ver}/caddy_${caddy_ver}_linux_amd64.tar.gz" | tar -C /usr/local/bin -xz caddy
+    chmod +x /usr/local/bin/caddy
+  }
+
   if has_cmd caddy; then
     log "Caddy already installed: $(caddy version 2>/dev/null || true)"
   else
     log "Installing Caddy..."
-    local caddy_ver="2.8.4"
-    if is_ubuntu || is_debian; then
-      install_packages curl
-      curl -sL "https://github.com/caddyserver/caddy/releases/download/v${caddy_ver}/caddy_${caddy_ver}_linux_amd64.tar.gz" | tar -C /usr/local/bin -xz caddy
-      chmod +x /usr/local/bin/caddy
+    if is_arch || is_alpine; then
+      install_packages caddy
     elif is_rhel; then
-      dnf install -y caddy 2>/dev/null || {
-        curl -sL "https://github.com/caddyserver/caddy/releases/download/v${caddy_ver}/caddy_${caddy_ver}_linux_amd64.tar.gz" | tar -C /usr/local/bin -xz caddy
-        chmod +x /usr/local/bin/caddy
-      }
-    elif is_arch; then
-      install_packages caddy
-    elif is_alpine; then
-      install_packages caddy
+      dnf install -y caddy 2>/dev/null || download_caddy
     else
-      curl -sL "https://github.com/caddyserver/caddy/releases/download/v${caddy_ver}/caddy_${caddy_ver}_linux_amd64.tar.gz" | tar -C /usr/local/bin -xz caddy
-      chmod +x /usr/local/bin/caddy
+      download_caddy
     fi
   fi
 
@@ -613,23 +597,9 @@ main() {
   echo -e "\033[1;36m========================================\033[0m"
   echo ""
 
-  # Phase 1: Dependencies
+  # Phase 1: Dependencies (same set on every distro)
   log "Phase 1/5: Installing dependencies..."
-  local pkgs=()
-  if is_ubuntu || is_debian; then
-    pkgs+=(curl git wget)
-  elif is_rhel; then
-    pkgs+=(curl git wget)
-  elif is_arch; then
-    pkgs+=(curl git wget)
-  elif is_alpine; then
-    pkgs+=(curl git wget)
-  elif is_suse; then
-    pkgs+=(curl git wget)
-  elif is_void; then
-    pkgs+=(curl git wget)
-  fi
-  install_packages "${pkgs[@]}"
+  install_packages curl git wget
 
   # Phase 2: System user
   log "Phase 2/5: Creating system user..."

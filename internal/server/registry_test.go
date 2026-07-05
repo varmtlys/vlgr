@@ -9,15 +9,12 @@ func TestRegistry_RegisterAndGet(t *testing.T) {
 	r := NewRegistry()
 	h := &ClientHandler{}
 
-	tunnel, err := r.Register("testsub", 3000, h)
+	tunnel, err := r.Register("testsub", h)
 	if err != nil {
 		t.Fatalf("Register failed: %v", err)
 	}
 	if tunnel.Subdomain != "testsub" {
 		t.Errorf("Subdomain: want testsub, got %q", tunnel.Subdomain)
-	}
-	if tunnel.LocalPort != 3000 {
-		t.Errorf("LocalPort: want 3000, got %d", tunnel.LocalPort)
 	}
 	if tunnel.Handler != h {
 		t.Error("Handler mismatch")
@@ -47,11 +44,11 @@ func TestRegistry_RegisterDuplicate(t *testing.T) {
 	r := NewRegistry()
 	h := &ClientHandler{}
 
-	_, err := r.Register("dup", 3000, h)
+	_, err := r.Register("dup", h)
 	if err != nil {
 		t.Fatalf("first Register failed: %v", err)
 	}
-	_, err = r.Register("dup", 4000, h)
+	_, err = r.Register("dup", h)
 	if err == nil {
 		t.Error("expected error for duplicate subdomain")
 	}
@@ -61,7 +58,7 @@ func TestRegistry_Unregister(t *testing.T) {
 	r := NewRegistry()
 	h := &ClientHandler{}
 
-	r.Register("temp", 3000, h)
+	r.Register("temp", h)
 	r.Unregister("temp")
 
 	if got := r.Get("temp"); got != nil {
@@ -84,7 +81,7 @@ func TestRegistry_ConcurrentAccess(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			sub := generateSubdomain()
-			r.Register(sub, uint16(n+1000), h)
+			r.Register(sub, h)
 			r.Get(sub)
 			r.Unregister(sub)
 		}(i)
@@ -100,10 +97,9 @@ func TestRegistry_MultipleTunnels(t *testing.T) {
 	h := &ClientHandler{}
 
 	subs := []string{"api", "web", "admin", "db", "cache"}
-	ports := []uint16{3000, 3001, 3002, 5432, 6379}
 
-	for i, sub := range subs {
-		tun, err := r.Register(sub, ports[i], h)
+	for _, sub := range subs {
+		tun, err := r.Register(sub, h)
 		if err != nil {
 			t.Fatalf("Register %q failed: %v", sub, err)
 		}
@@ -141,14 +137,5 @@ func TestGenerateSubdomain_Format(t *testing.T) {
 				t.Errorf("non-hex character in subdomain %q: %c", s, c)
 			}
 		}
-	}
-}
-
-func TestTunnel_CreatedAt(t *testing.T) {
-	r := NewRegistry()
-	h := &ClientHandler{}
-	tun, _ := r.Register("timed", 3000, h)
-	if tun.CreatedAt.IsZero() {
-		t.Error("CreatedAt should not be zero")
 	}
 }
