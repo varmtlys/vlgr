@@ -103,7 +103,7 @@ func TestEncodeDecodeHTTPRequest_Roundtrip(t *testing.T) {
 		},
 		Body: []byte(`{"key":"value"}`),
 	}
-	encoded := EncodeHTTPRequest(original)
+	encoded, _ := EncodeHTTPRequest(original)
 	decoded, err := DecodeHTTPRequest(encoded)
 	if err != nil {
 		t.Fatalf("DecodeHTTPRequest failed: %v", err)
@@ -139,7 +139,7 @@ func TestEncodeDecodeHTTPRequest_EmptyBody(t *testing.T) {
 		Headers: map[string][]string{},
 		Body:    nil,
 	}
-	encoded := EncodeHTTPRequest(original)
+	encoded, _ := EncodeHTTPRequest(original)
 	decoded, err := DecodeHTTPRequest(encoded)
 	if err != nil {
 		t.Fatalf("DecodeHTTPRequest failed: %v", err)
@@ -174,7 +174,7 @@ func TestEncodeDecodeHTTPResponse_Roundtrip(t *testing.T) {
 		},
 		Body: []byte("<html>OK</html>"),
 	}
-	encoded := EncodeHTTPResponse(original)
+	encoded, _ := EncodeHTTPResponse(original)
 	decoded, err := DecodeHTTPResponse(encoded)
 	if err != nil {
 		t.Fatalf("DecodeHTTPResponse failed: %v", err)
@@ -196,7 +196,7 @@ func TestEncodeDecodeHTTPResponse_ErrorStatus(t *testing.T) {
 		Headers:    map[string][]string{"Content-Type": {"text/plain"}},
 		Body:       []byte("Bad Gateway"),
 	}
-	encoded := EncodeHTTPResponse(original)
+	encoded, _ := EncodeHTTPResponse(original)
 	decoded, err := DecodeHTTPResponse(encoded)
 	if err != nil {
 		t.Fatalf("DecodeHTTPResponse failed: %v", err)
@@ -368,7 +368,7 @@ func TestEncodeHTTPResponse_NoBody(t *testing.T) {
 		Headers:    map[string][]string{"X-Empty": {}},
 		Body:       nil,
 	}
-	encoded := EncodeHTTPResponse(resp)
+	encoded, _ := EncodeHTTPResponse(resp)
 	decoded, err := DecodeHTTPResponse(encoded)
 	if err != nil {
 		t.Fatalf("DecodeHTTPResponse: %v", err)
@@ -388,7 +388,7 @@ func TestEncodeHTTPRequest_NoHeaders(t *testing.T) {
 		Headers: nil,
 		Body:    []byte{},
 	}
-	encoded := EncodeHTTPRequest(req)
+	encoded, _ := EncodeHTTPRequest(req)
 	decoded, err := DecodeHTTPRequest(encoded)
 	if err != nil {
 		t.Fatalf("DecodeHTTPRequest: %v", err)

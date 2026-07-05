@@ -294,26 +294,33 @@ func (t *Tunnel) portFor(tunnelID uint64) (uint16, bool) {
 	return port, ok
 }
 
-func copyHeaders(dst http.Header, src map[string][]string, host string) {
+func copyHeaders(dst *http.Request, src map[string][]string) {
 	for k, values := range src {
-		if k == "Content-Length" || k == "Transfer-Encoding" {
+		switch k {
+		case "Content-Length", "Transfer-Encoding":
+			continue
+		case "Host":
+			if len(values) > 0 {
+				dst.Host = values[0]
+			}
 			continue
 		}
 		for _, v := range values {
-			dst.Add(k, v)
+			dst.Header.Add(k, v)
 		}
 	}
-	dst.Set("Host", host)
 }
 
 func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 	select {
 	case t.localReqSem <- struct{}{}:
-		defer func() { <-t.localReqSem }()
 	default:
 		t.sendHTTPError(frame.TunnelID, frame.RequestID, 503, "too many concurrent local requests")
 		return
 	}
+	var relOnce sync.Once
+	release := func() { relOnce.Do(func() { <-t.localReqSem }) }
+	defer release()
 
 	req, err := protocol.DecodeHTTPRequest(frame.Payload)
 	if err != nil {
@@ -335,7 +342,7 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 	}
 
 	if protocol.IsWebSocketUpgradeReq(req) {
-		t.handleWebSocketReq(frame.TunnelID, frame.RequestID, req)
+		t.handleWebSocketReq(frame.TunnelID, frame.RequestID, req, release)
 		return
 	}
 
@@ -379,7 +386,7 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 		return
 	}
 
-	copyHeaders(httpReq.Header, req.Headers, fmt.Sprintf("localhost:%d", localPort))
+	copyHeaders(httpReq, req.Headers)
 
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
@@ -389,10 +396,15 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 	}
 	defer httpResp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(httpResp.Body, protocol.MaxBodySize))
+	body, err := io.ReadAll(io.LimitReader(httpResp.Body, protocol.MaxBodySize+1))
 	if err != nil {
 		log.Printf("[client] read response body error: %v", err)
 		t.sendHTTPError(tunnelID, requestID, 502, err.Error())
+		return
+	}
+	if len(body) > protocol.MaxBodySize {
+		log.Printf("[client] response body exceeds %d bytes, rejecting", protocol.MaxBodySize)
+		t.sendHTTPError(tunnelID, requestID, 502, fmt.Sprintf("response body exceeds max %d bytes", protocol.MaxBodySize))
 		return
 	}
 
@@ -429,7 +441,7 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 	})
 }
 
-func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTTPRequest) {
+func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTTPRequest, release func()) {
 	localPort, ok := t.portFor(tunnelID)
 	if !ok {
 		log.Printf("[client] unknown tunnel ID %d for WebSocket", tunnelID)
@@ -455,7 +467,7 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 		return
 	}
 
-	copyHeaders(httpReq.Header, req.Headers, fmt.Sprintf("localhost:%d", localPort))
+	copyHeaders(httpReq, req.Headers)
 
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
 	if err := httpReq.Write(conn); err != nil {
@@ -509,6 +521,8 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 	t.relays[requestID] = relay
 	t.relaysMu.Unlock()
 
+	release()
+
 	if t.debug {
 		log.Printf("[debug] WebSocket relay started for request #%d", requestID)
 	}
@@ -549,7 +563,15 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 }
 
 func (t *Tunnel) writeResponse(tunnelID, requestID uint64, resp protocol.HTTPResponse) {
-	respPayload := protocol.EncodeHTTPResponse(resp)
+	respPayload, err := protocol.EncodeHTTPResponse(resp)
+	if err != nil {
+		log.Printf("[client] encode response error: %v", err)
+		respPayload, _ = protocol.EncodeHTTPResponse(protocol.HTTPResponse{
+			StatusCode: 502,
+			Headers:    map[string][]string{"Content-Type": {"text/plain"}},
+			Body:       []byte("vlgr: response encoding failed: " + err.Error()),
+		})
+	}
 	t.writeFrame(protocol.Frame{
 		Type:      protocol.MsgHTTPRes,
 		TunnelID:  tunnelID,

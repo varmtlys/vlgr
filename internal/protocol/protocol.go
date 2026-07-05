@@ -91,10 +91,15 @@ func DecodeFrame(data []byte) (Frame, error) {
 	}, nil
 }
 
-func writeString(buf *bytes.Buffer, s string) {
-	b := []byte(s)
-	binary.Write(buf, binary.BigEndian, uint16(len(b)))
-	buf.Write(b)
+const maxStringLen = 65535
+
+func writeString(buf *bytes.Buffer, s string) error {
+	if len(s) > maxStringLen {
+		return fmt.Errorf("string too long: %d > %d", len(s), maxStringLen)
+	}
+	binary.Write(buf, binary.BigEndian, uint16(len(s)))
+	buf.WriteString(s)
+	return nil
 }
 
 func readString(reader *bytes.Reader) (string, error) {
@@ -112,15 +117,20 @@ func readString(reader *bytes.Reader) (string, error) {
 	return string(buf), nil
 }
 
-func writeHeaders(buf *bytes.Buffer, headers map[string][]string) {
+func writeHeaders(buf *bytes.Buffer, headers map[string][]string) error {
 	binary.Write(buf, binary.BigEndian, uint32(len(headers)))
 	for k, values := range headers {
-		writeString(buf, k)
+		if err := writeString(buf, k); err != nil {
+			return fmt.Errorf("header key: %w", err)
+		}
 		binary.Write(buf, binary.BigEndian, uint32(len(values)))
 		for _, v := range values {
-			writeString(buf, v)
+			if err := writeString(buf, v); err != nil {
+				return fmt.Errorf("header %q value: %w", k, err)
+			}
 		}
 	}
+	return nil
 }
 
 func readHeaders(reader *bytes.Reader) (map[string][]string, error) {
@@ -160,16 +170,20 @@ func readHeaders(reader *bytes.Reader) (map[string][]string, error) {
 	return headers, nil
 }
 
-func EncodeHTTPRequest(req HTTPRequest) []byte {
+func EncodeHTTPRequest(req HTTPRequest) ([]byte, error) {
 	var buf bytes.Buffer
-	writeString(&buf, req.Method)
-	writeString(&buf, req.Path)
-	writeHeaders(&buf, req.Headers)
-	binary.Write(&buf, binary.BigEndian, uint32(len(req.Body)))
-	if len(req.Body) > 0 {
-		buf.Write(req.Body)
+	if err := writeString(&buf, req.Method); err != nil {
+		return nil, fmt.Errorf("method: %w", err)
 	}
-	return buf.Bytes()
+	if err := writeString(&buf, req.Path); err != nil {
+		return nil, fmt.Errorf("path: %w", err)
+	}
+	if err := writeHeaders(&buf, req.Headers); err != nil {
+		return nil, err
+	}
+	binary.Write(&buf, binary.BigEndian, uint32(len(req.Body)))
+	buf.Write(req.Body)
+	return buf.Bytes(), nil
 }
 
 func DecodeHTTPRequest(data []byte) (HTTPRequest, error) {
@@ -209,15 +223,15 @@ func DecodeHTTPRequest(data []byte) (HTTPRequest, error) {
 	return req, nil
 }
 
-func EncodeHTTPResponse(resp HTTPResponse) []byte {
+func EncodeHTTPResponse(resp HTTPResponse) ([]byte, error) {
 	var buf bytes.Buffer
 	binary.Write(&buf, binary.BigEndian, resp.StatusCode)
-	writeHeaders(&buf, resp.Headers)
-	binary.Write(&buf, binary.BigEndian, uint32(len(resp.Body)))
-	if len(resp.Body) > 0 {
-		buf.Write(resp.Body)
+	if err := writeHeaders(&buf, resp.Headers); err != nil {
+		return nil, err
 	}
-	return buf.Bytes()
+	binary.Write(&buf, binary.BigEndian, uint32(len(resp.Body)))
+	buf.Write(resp.Body)
+	return buf.Bytes(), nil
 }
 
 func DecodeHTTPResponse(data []byte) (HTTPResponse, error) {

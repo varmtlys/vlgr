@@ -180,7 +180,7 @@ func TestHandleWebSocketReq_UnknownTunnel(t *testing.T) {
 			}
 			close(done)
 		}()
-		tun.handleWebSocketReq(999, 1, req)
+		tun.handleWebSocketReq(999, 1, req, func() {})
 	}()
 	<-done
 }
@@ -201,7 +201,7 @@ func TestHandleWebSocketReq_DialError(t *testing.T) {
 			}
 			close(done)
 		}()
-		tun.handleWebSocketReq(1, 1, req)
+		tun.handleWebSocketReq(1, 1, req, func() {})
 	}()
 	<-done
 }
@@ -265,7 +265,7 @@ func TestEncodeDecodeHTTPResponse_Client(t *testing.T) {
 		Headers:    map[string][]string{"Content-Type": {"application/json"}},
 		Body:       []byte(`{"ok":true}`),
 	}
-	encoded := protocol.EncodeHTTPResponse(original)
+	encoded, _ := protocol.EncodeHTTPResponse(original)
 	decoded, err := protocol.DecodeHTTPResponse(encoded)
 	if err != nil {
 		t.Fatalf("DecodeHTTPResponse: %v", err)

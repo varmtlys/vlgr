@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -68,6 +69,17 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	headers["Host"] = []string{r.Host}
+	headers["X-Forwarded-Host"] = []string{r.Host}
+	if len(headers["X-Forwarded-Proto"]) == 0 {
+		proto := "http"
+		if r.TLS != nil {
+			proto = "https"
+		}
+		headers["X-Forwarded-Proto"] = []string{proto}
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		headers["X-Forwarded-For"] = append(headers["X-Forwarded-For"], host)
+	}
 
 	requestPath := r.URL.EscapedPath()
 	if r.URL.RawQuery != "" {
@@ -97,21 +109,14 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cleanup()
 
-	if streamData == nil {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		for key, values := range resp.Headers {
-			if !validHeaderName(key) {
-				log.Printf("[proxy] dropping response header with invalid name: %q", key)
-				continue
-			}
-			for _, value := range values {
-				if !validHeaderValue(value) {
-					log.Printf("[proxy] dropping response header %q with invalid value (CRLF?)", key)
-					continue
-				}
-				w.Header().Add(key, value)
-			}
+	if streamData == nil || resp.StatusCode != 101 {
+		copyValidHeaders(resp.Headers, w.Header().Add)
+		// Security defaults only when the app didn't set its own.
+		if w.Header().Get("X-Content-Type-Options") == "" {
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+		}
+		if w.Header().Get("X-Frame-Options") == "" {
+			w.Header().Set("X-Frame-Options", "DENY")
 		}
 		w.WriteHeader(int(resp.StatusCode))
 		w.Write(resp.Body)
@@ -133,19 +138,9 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
-	for key, values := range resp.Headers {
-		if !validHeaderName(key) {
-			log.Printf("[proxy] dropping response header with invalid name: %q", key)
-			continue
-		}
-		for _, value := range values {
-			if !validHeaderValue(value) {
-				log.Printf("[proxy] dropping response header %q with invalid value (CRLF?)", key)
-				continue
-			}
-			bufrw.WriteString(fmt.Sprintf("%s: %s\r\n", key, value))
-		}
-	}
+	copyValidHeaders(resp.Headers, func(key, value string) {
+		fmt.Fprintf(bufrw, "%s: %s\r\n", key, value)
+	})
 	bufrw.WriteString("\r\n")
 	if err := bufrw.Flush(); err != nil {
 		log.Printf("[proxy] flush error for %s: %v", subdomain, err)
@@ -154,7 +149,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if p.debug {
-		log.Printf("[debug] WebSocket relay started for %s (request #%d)", requestPath, resp.StatusCode)
+		log.Printf("[debug] WebSocket relay started for %s (request #%d)", requestPath, requestID)
 	}
 
 	var wg sync.WaitGroup
@@ -194,6 +189,22 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if p.debug {
 		log.Printf("[debug] WebSocket relay ended for %s", requestPath)
+	}
+}
+
+func copyValidHeaders(headers map[string][]string, add func(key, value string)) {
+	for key, values := range headers {
+		if !validHeaderName(key) {
+			log.Printf("[proxy] dropping response header with invalid name: %q", key)
+			continue
+		}
+		for _, value := range values {
+			if !validHeaderValue(value) {
+				log.Printf("[proxy] dropping response header %q with invalid value (CRLF?)", key)
+				continue
+			}
+			add(key, value)
+		}
 	}
 }
 

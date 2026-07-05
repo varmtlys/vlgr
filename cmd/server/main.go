@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -46,7 +47,8 @@ func main() {
 	registry := server.NewRegistry()
 	proxy := server.NewReverseProxy(registry, baseDomain, *debug)
 
-	http.HandleFunc("/_tunnel", func(w http.ResponseWriter, r *http.Request) {
+	tunnelMux := http.NewServeMux()
+	tunnelMux.HandleFunc("/_tunnel", func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case connSem <- struct{}{}:
 			defer func() { <-connSem }()
@@ -66,15 +68,26 @@ func main() {
 		handler.Run()
 	})
 
+	publicSrv := &http.Server{
+		Addr:              *httpAddr,
+		Handler:           proxy,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	tunnelSrv := &http.Server{
+		Addr:              *wsAddr,
+		Handler:           tunnelMux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
 	go func() {
 		log.Printf("[server] public HTTP listening on %s", *httpAddr)
-		if err := http.ListenAndServe(*httpAddr, proxy); err != nil {
+		if err := publicSrv.ListenAndServe(); err != nil {
 			log.Fatalf("[server] public HTTP error: %v", err)
 		}
 	}()
 
 	log.Printf("[server] tunnel WebSocket listening on %s", *wsAddr)
-	if err := http.ListenAndServe(*wsAddr, nil); err != nil {
+	if err := tunnelSrv.ListenAndServe(); err != nil {
 		log.Fatalf("[server] tunnel server error: %v", err)
 	}
 }

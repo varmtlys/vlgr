@@ -322,7 +322,7 @@ func TestHandleHTTPRes_NoPending(t *testing.T) {
 	}
 
 	resp := protocol.HTTPResponse{StatusCode: 200}
-	payload := protocol.EncodeHTTPResponse(resp)
+	payload, _ := protocol.EncodeHTTPResponse(resp)
 
 	h.handleHTTPRes(protocol.Frame{
 		RequestID: 999,
@@ -416,7 +416,7 @@ func TestHandleHTTPRes_WithPending(t *testing.T) {
 	h.pending[1] = pr
 
 	resp := protocol.HTTPResponse{StatusCode: 200, Body: []byte("ok")}
-	payload := protocol.EncodeHTTPResponse(resp)
+	payload, _ := protocol.EncodeHTTPResponse(resp)
 
 	go h.handleHTTPRes(protocol.Frame{RequestID: 1, Payload: payload})
 
@@ -443,7 +443,7 @@ func TestHandleHTTPRes_WithPending_Done(t *testing.T) {
 	h.pending[1] = pr
 
 	resp := protocol.HTTPResponse{StatusCode: 200}
-	payload := protocol.EncodeHTTPResponse(resp)
+	payload, _ := protocol.EncodeHTTPResponse(resp)
 
 	h.handleHTTPRes(protocol.Frame{RequestID: 1, Payload: payload})
 }

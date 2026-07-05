@@ -460,11 +460,12 @@ User=${user}
 Group=${group}
 WorkingDirectory=${INSTALL_PATH}
 EnvironmentFile=/etc/vlgr/vlgr-server.conf
+# Token intentionally NOT passed as a flag: /proc/PID/cmdline is world-readable.
+# The server reads VLGR_TOKEN from the environment (EnvironmentFile above).
 ExecStart=${INSTALL_PATH}/bin/vlgr-server \\
     -addr \${VLGR_WS_ADDR} \\
     -http \${VLGR_HTTP_ADDR} \\
-    -domain \${VLGR_DOMAIN} \\
-    -token \${VLGR_TOKEN}
+    -domain \${VLGR_DOMAIN}
 Restart=always
 RestartSec=5
 TimeoutStopSec=10

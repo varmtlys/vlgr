@@ -171,6 +171,7 @@ func (h *ClientHandler) handleAuth(frame protocol.Frame) {
 		if subtle.ConstantTimeCompare(h.expectedHash[:], gotHash[:]) != 1 {
 			log.Printf("[handler] auth rejected: invalid token")
 			h.writeMessage(protocol.MsgAuthErr, 0, 0, []byte("invalid token"))
+			h.cleanup()
 			return
 		}
 	}
@@ -198,9 +199,11 @@ func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 			h.writeError(0, "subdomain too long")
 			return
 		}
-		if len(frame.Payload) >= 3+n {
-			requestedSubdomain = string(frame.Payload[3 : 3+n])
+		if len(frame.Payload) < 3+n {
+			h.writeMessage(protocol.MsgRegisterErr, 0, 0, []byte("truncated register payload"))
+			return
 		}
+		requestedSubdomain = string(frame.Payload[3 : 3+n])
 	}
 	if !validSubdomain(requestedSubdomain) {
 		h.writeError(0, "invalid subdomain characters")
@@ -294,7 +297,10 @@ func (h *ClientHandler) handleStreamData(frame protocol.Frame) {
 		case pr.streamData <- frame.Payload:
 		case <-pr.done:
 		case <-time.After(protocol.StreamSendTimeout):
-			log.Printf("[handler] stream send timeout for request %d (slow consumer)", frame.RequestID)
+			log.Printf("[handler] stream send timeout for request %d (slow consumer), closing stream", frame.RequestID)
+			h.removePending(frame.RequestID)
+			pr.closeStream()
+			h.SendStreamClose(frame.RequestID)
 		}
 	}()
 }
@@ -332,7 +338,12 @@ func (h *ClientHandler) ForwardHTTP(tunnelID uint64, req protocol.HTTPRequest, s
 	h.pending[requestID] = pr
 	h.mu.Unlock()
 
-	payload := protocol.EncodeHTTPRequest(req)
+	payload, err := protocol.EncodeHTTPRequest(req)
+	if err != nil {
+		h.removePending(requestID)
+		pr.closeDone()
+		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: encode error: %w", err)
+	}
 
 	if h.debug {
 		log.Printf("[debug] forward payload #%d: %d bytes", requestID, len(payload))
@@ -402,23 +413,25 @@ func (h *ClientHandler) writeError(requestID uint64, msg string) {
 }
 
 func (h *ClientHandler) cleanup() {
-	for _, tunnel := range h.tunnels {
-		h.registry.Unregister(tunnel.Subdomain)
-		log.Printf("[handler] tunnel %s unregistered", tunnel.Subdomain)
-	}
+	h.closeOnce.Do(func() {
+		for _, tunnel := range h.tunnels {
+			h.registry.Unregister(tunnel.Subdomain)
+			log.Printf("[handler] tunnel %s unregistered", tunnel.Subdomain)
+		}
 
-	h.mu.Lock()
-	for id, pr := range h.pending {
-		pr.closeStream()
-		pr.closeDone()
-		delete(h.pending, id)
-	}
-	h.mu.Unlock()
+		h.mu.Lock()
+		for id, pr := range h.pending {
+			pr.closeStream()
+			pr.closeDone()
+			delete(h.pending, id)
+		}
+		h.mu.Unlock()
 
-	h.closeOnce.Do(func() { close(h.done) })
-	if h.conn != nil {
-		h.conn.Close()
-	}
+		close(h.done)
+		if h.conn != nil {
+			h.conn.Close()
+		}
+	})
 }
 
 func validSubdomain(s string) bool {
