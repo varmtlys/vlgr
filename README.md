@@ -56,7 +56,9 @@ vlgr/
 │
 ├── cmd/
 │   ├── server/main.go              # Server entry point
-│   └── client/main.go              # Client entry point
+│   └── client/
+│       ├── main.go                 # Client entry point
+│       └── main_test.go            # 1 test with 26 address validation cases
 │
 ├── internal/
 │   ├── protocol/
@@ -64,14 +66,14 @@ vlgr/
 │   │   └── protocol_test.go        # 22 unit tests: frames, HTTP serde, WS detection
 │   ├── server/
 │   │   ├── registry.go             # Tunnel registry (subdomain → Tunnel)
-│   │   ├── registry_test.go        # 10 tests: register, get, unregister, concurrency
+│   │   ├── registry_test.go        # 8 tests: register, get, unregister, concurrency
 │   │   ├── handler.go              # Client WebSocket handler
-│   │   ├── handler_test.go         # 18 tests: auth, registration, frame dispatch
+│   │   ├── handler_test.go         # 39 tests: auth, registration, frame dispatch, stream relay, concurrency
 │   │   ├── proxy.go                # Reverse proxy for incoming HTTP
-│   │   └── proxy_test.go           # 2 tests: subdomain extraction (16 cases)
+│   │   └── proxy_test.go           # 2 tests: subdomain extraction (17 cases)
 │   ├── client/
 │   │   ├── tunnel.go               # Client logic: connect, register, proxy
-│   │   └── tunnel_test.go          # 16 tests: routing, WS relay, error paths
+│   │   └── tunnel_test.go          # 23 tests: routing, WS relay, error paths, concurrency
 │   └── integration/
 │       └── integration_test.go     # 22 E2E tests: live server/client/backend
 │

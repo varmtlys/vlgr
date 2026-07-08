@@ -88,7 +88,7 @@ Grab the pre-built client binary for your platform from [GitHub Releases](https:
 ./vlgr-client -server tunnel.domain.com:443 -local "8080,3000,5000" -subdomain "api,web,admin" -tls -token <token>
 ```
 
-> The auto-deploy script automates Steps 1–6 below. For a manual setup or to understand each component, follow the detailed guide.
+> The auto-deploy script automates Steps 3–6 (server-side setup). Steps 1–2 (Cloudflare DNS & API token) and Step 7 (client connection) must be done manually. For a manual setup or to understand each component, follow the detailed guide.
 
 ---
 
