@@ -347,6 +347,7 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 | `--subdomain` | `-u` | auto | Request custom subdomain(s), comma-separated — order matches `--ports` |
 | `--tls` | | `false` | Use WSS (TLS) — required when connecting via Caddy/HTTPS |
 | `--verbose` | `-v` | `info` | Log level: `info` (default) or `debug` |
+| `--add` | | | Add a port with subdomain to running instance: `"<port> <subdomain>"` |
 | `--help` | `-h` | | Show help with usage examples |
 
 ---
@@ -387,6 +388,9 @@ sudo ./scripts/deploy-server.sh -d tunnel.domain.com -t my-token \
 
 # Client — multiple tunnels
 ./vlgr-client -s tunnel.domain.com:443 -p "8080,3000,5000" -u "api,web,admin" --tls
+
+# Add ports to running client
+./vlgr-client --add "5000 mysub"
 ```
 
 ---

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,11 @@ func (r *streamRelay) closeDone() {
 	r.doneOnce.Do(func() { close(r.done) })
 }
 
+type addResult struct {
+	url string
+	err error
+}
+
 type Tunnel struct {
 	serverAddr string
 	token      string
@@ -59,6 +65,13 @@ type Tunnel struct {
 	relaysMu sync.Mutex
 
 	localReqSem chan struct{}
+
+	controlLn   net.Listener
+	controlAddr string
+
+	addMu   sync.Mutex
+	addCh   chan addResult
+	addPort uint16
 }
 
 func NewTunnel(serverAddr, token string, ports []uint16, subdomains []string, useTLS bool) *Tunnel {
@@ -209,12 +222,18 @@ func (t *Tunnel) Run() {
 					frame.TunnelID, frame.RequestID, len(frame.Payload))
 			}
 			go t.handleHTTPReq(frame)
+		case protocol.MsgRegisterOK:
+			t.handleAddResponse(frame, nil)
+		case protocol.MsgRegisterErr:
+			t.handleAddResponse(frame, fmt.Errorf("%s", string(frame.Payload)))
 		case protocol.MsgStreamData:
 			t.handleStreamData(frame)
 		case protocol.MsgStreamClose:
 			t.handleStreamClose(frame)
 		case protocol.MsgError:
-			log.Printf("[client] server error: %s", string(frame.Payload))
+			if !t.handleAddResponse(frame, fmt.Errorf("%s", string(frame.Payload))) {
+				log.Printf("[client] server error: %s", string(frame.Payload))
+			}
 		case protocol.MsgCloseTunnel:
 			log.Printf("[client] server closed tunnel")
 			return
@@ -222,6 +241,38 @@ func (t *Tunnel) Run() {
 			log.Printf("[client] unknown message type: 0x%02x", frame.Type)
 		}
 	}
+}
+
+func (t *Tunnel) handleAddResponse(frame protocol.Frame, err error) bool {
+	t.addMu.Lock()
+	ch := t.addCh
+	port := t.addPort
+	t.addCh = nil
+	t.addMu.Unlock()
+
+	if ch == nil {
+		return false
+	}
+
+	if err != nil {
+		ch <- addResult{err: err}
+		return true
+	}
+
+	if frame.Type == protocol.MsgRegisterOK {
+		url, tunnelID, decErr := protocol.DecodeRegisterOK(frame.Payload)
+		if decErr != nil {
+			ch <- addResult{err: decErr}
+			return true
+		}
+		t.mappings[tunnelID] = port
+		t.publicURL = appendURL(t.publicURL, url)
+		log.Printf("[client] tunnel ready: %s -> localhost:%d", url, port)
+		ch <- addResult{url: url}
+		return true
+	}
+
+	return false
 }
 
 func (t *Tunnel) handleStreamData(frame protocol.Frame) {
@@ -259,6 +310,110 @@ func (t *Tunnel) handleStreamClose(frame protocol.Frame) {
 		relay.closeDone()
 		relay.conn.Close()
 	}
+}
+
+func (t *Tunnel) StartControl() error {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	t.controlLn = ln
+	t.controlAddr = ln.Addr().String()
+
+	go t.serveControl()
+	return nil
+}
+
+func (t *Tunnel) ControlAddr() string {
+	return t.controlAddr
+}
+
+func (t *Tunnel) serveControl() {
+	for {
+		conn, err := t.controlLn.Accept()
+		if err != nil {
+			return
+		}
+		go t.handleControlConn(conn)
+	}
+}
+
+func (t *Tunnel) handleControlConn(conn net.Conn) {
+	defer conn.Close()
+	scanner := bufio.NewScanner(conn)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 2 || parts[0] != "ADD" {
+			fmt.Fprintf(conn, "ERR bad command\n")
+			continue
+		}
+		port, err := strconv.Atoi(parts[1])
+		if err != nil || port < 1 || port > 65535 {
+			fmt.Fprintf(conn, "ERR invalid port\n")
+			continue
+		}
+		subdomain := ""
+		if len(parts) > 2 {
+			subdomain = parts[2]
+		}
+
+		url, err := t.AddPort(uint16(port), subdomain)
+		if err != nil {
+			fmt.Fprintf(conn, "ERR %v\n", err)
+		} else {
+			fmt.Fprintf(conn, "OK %s\n", url)
+		}
+	}
+}
+
+func (t *Tunnel) AddPort(port uint16, subdomain string) (string, error) {
+	t.addMu.Lock()
+	if t.addCh != nil {
+		t.addMu.Unlock()
+		return "", fmt.Errorf("another add operation in progress")
+	}
+
+	regPayload, err := protocol.EncodeRegister(port, subdomain)
+	if err != nil {
+		t.addMu.Unlock()
+		return "", err
+	}
+
+	ch := make(chan addResult, 1)
+	t.addCh = ch
+	t.addPort = port
+	t.addMu.Unlock()
+
+	if err := t.writeFrame(protocol.Frame{
+		Type:    protocol.MsgRegister,
+		Payload: regPayload,
+	}); err != nil {
+		t.addMu.Lock()
+		t.addCh = nil
+		t.addMu.Unlock()
+		return "", fmt.Errorf("send register: %w", err)
+	}
+
+	select {
+	case result := <-ch:
+		return result.url, result.err
+	case <-time.After(15 * time.Second):
+		t.addMu.Lock()
+		t.addCh = nil
+		t.addMu.Unlock()
+		return "", fmt.Errorf("add port timeout")
+	}
+}
+
+func appendURL(existing, url string) string {
+	if existing == "" {
+		return url
+	}
+	return existing + ", " + url
 }
 
 func (t *Tunnel) pingLoop() {
@@ -537,6 +692,10 @@ func (t *Tunnel) Close() {
 	t.closeOnce.Do(func() {
 		close(t.done)
 	})
+
+	if t.controlLn != nil {
+		t.controlLn.Close()
+	}
 
 	t.relaysMu.Lock()
 	for id, relay := range t.relays {
