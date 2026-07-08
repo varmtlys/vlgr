@@ -231,7 +231,7 @@ host = "abc123.tunnel.domain.com", baseDomain = "tunnel.domain.com"
 **Connect():**
 1. Dial WebSocket (`ws://` or `wss://` depending on `-tls` flag).
 2. Send `MsgAuth` with token.
-3. For each port in the comma-separated `-local` list, send `MsgRegister` with port and optional subdomain (matched by position in `-subdomain`).
+3. For each port in the comma-separated `--ports` list, send `MsgRegister` with port and optional subdomain (matched by position in `--subdomain`).
 4. Parse public URLs and tunnelIDs from responses. Store `tunnelID → port` mapping for routing.
 
 **Run():**
@@ -272,7 +272,7 @@ go run ./cmd/server
 python -m http.server 3000
 
 # Terminal 3 — VLGR client
-go run ./cmd/client -local 3000
+go run ./cmd/client -p 3000
 
 # Terminal 4 — test
 curl -H "Host: <hex-from-output>.localhost:8080" http://localhost:8080/
@@ -328,24 +328,26 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 
 ### Server (`cmd/server`)
 
-| Flag | Default | Description |
-|---|---|---|
-| `-addr` | `:4443` | WebSocket listen address for tunnel clients |
-| `-http` | `:8080` | HTTP listen address for public traffic |
-| `-domain` | `localhost:8080` | Base domain for tunnel URLs (e.g. `tunnel.domain.com`) |
-| `-token` | `""` | Auth token for clients (empty = no auth, or set `VLGR_TOKEN` env) |
-| `-debug` | `false` | Enable verbose debug logging |
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--addr` | `-a` | `:4443` | WebSocket listen address for tunnel clients |
+| `--http` | `-w` | `:8080` | HTTP listen address for public traffic |
+| `--domain` | `-d` | `localhost:8080` | Base domain for tunnel URLs (e.g. `tunnel.domain.com`) |
+| `--token` | `-t` | `""` | Auth token for clients (empty = no auth, or set `VLGR_TOKEN` env) |
+| `--verbose` | `-v` | `info` | Log level: `info` (default) or `debug` |
+| `--help` | `-h` | | Show help with usage examples |
 
 ### Client (`cmd/client`)
 
-| Flag | Default | Description |
-|---|---|---|
-| `-server` | `localhost:4443` | VLGR server address |
-| `-local` | **required** | Local port(s) to expose, comma-separated (e.g. `3000` or `8080,3000`) |
-| `-token` | `""` | Authentication token (required when server has `-token` set) |
-| `-subdomain` | auto | Request custom subdomain(s), comma-separated — order matches `-local` |
-| `-tls` | `false` | Use WSS (TLS) — required when connecting via Caddy/HTTPS |
-| `-debug` | `false` | Enable verbose debug logging |
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--server` | `-s` | `localhost:4443` | VLGR server address |
+| `--ports` | `-p` | **required** | Local port(s) to expose, comma-separated (e.g. `3000` or `8080,3000`) |
+| `--token` | `-t` | `""` | Authentication token (required when server has `--token` set) |
+| `--subdomain` | `-u` | auto | Request custom subdomain(s), comma-separated — order matches `--ports` |
+| `--tls` | | `false` | Use WSS (TLS) — required when connecting via Caddy/HTTPS |
+| `--verbose` | `-v` | `info` | Log level: `info` (default) or `debug` |
+| `--help` | `-h` | | Show help with usage examples |
 
 ---
 
@@ -381,10 +383,10 @@ sudo ./scripts/deploy-server.sh -d tunnel.domain.com -t my-token \
 ./vlgr-server -addr 127.0.0.1:4443 -http 127.0.0.1:8080 -domain tunnel.domain.com
 
 # Client (your machine) — single tunnel
-./vlgr-client -server tunnel.domain.com:443 -local 3000 -tls
+./vlgr-client -s tunnel.domain.com:443 -p 3000 --tls
 
 # Client — multiple tunnels
-./vlgr-client -server tunnel.domain.com:443 -local "8080,3000,5000" -subdomain "api,web,admin" -tls
+./vlgr-client -s tunnel.domain.com:443 -p "8080,3000,5000" -u "api,web,admin" --tls
 ```
 
 ---

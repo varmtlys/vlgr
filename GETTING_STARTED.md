@@ -82,10 +82,10 @@ Grab the pre-built client binary for your platform from [GitHub Releases](https:
 
 ```bash
 # Build client: GOOS=<os> GOARCH=<arch> go build -trimpath -ldflags="-s -w" -o build/vlgr-client-<os>-<arch> ./cmd/client
-./vlgr-client -server tunnel.domain.com:443 -local 3000 -tls -token <token>
+./vlgr-client -s tunnel.domain.com:443 -p 3000 --tls -t <token>
 
 # Multiple tunnels (ports match subdomains by position):
-./vlgr-client -server tunnel.domain.com:443 -local "8080,3000,5000" -subdomain "api,web,admin" -tls -token <token>
+./vlgr-client -s tunnel.domain.com:443 -p "8080,3000,5000" -u "api,web,admin" --tls -t <token>
 ```
 
 > The auto-deploy script automates Steps 3–6 (server-side setup). Steps 1–2 (Cloudflare DNS & API token) and Step 7 (client connection) must be done manually. For a manual setup or to understand each component, follow the detailed guide.
@@ -373,9 +373,9 @@ Run it:
 
 ```bash
 ./build/vlgr-client-linux-amd64 \
-    -server tunnel.domain.com:443 \
-    -local 3000 \
-    -tls
+    -s tunnel.domain.com:443 \
+    -p 3000 \
+    --tls
 ```
 
 Expected output (single tunnel):

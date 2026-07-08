@@ -42,7 +42,7 @@ type ClientHandler struct {
 	expectedToken string
 	expectedHash  [32]byte
 	authenticated bool
-	debug         bool
+	verbose       string
 
 	pending      map[uint64]*pendingReq
 	mu           sync.Mutex
@@ -53,14 +53,14 @@ type ClientHandler struct {
 	closeOnce sync.Once
 }
 
-func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain string, expectedToken string, debug bool) *ClientHandler {
+func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain string, expectedToken string, verbose string) *ClientHandler {
 	h := &ClientHandler{
 		conn:          conn,
 		registry:      registry,
 		tunnels:       make(map[uint64]*Tunnel),
 		baseDomain:    baseDomain,
 		expectedToken: expectedToken,
-		debug:         debug,
+		verbose:       verbose,
 		pending:       make(map[uint64]*pendingReq),
 		done:          make(chan struct{}),
 	}
@@ -105,7 +105,7 @@ func (h *ClientHandler) Run() {
 		frame, err := protocol.DecodeFrame(msg)
 		if err != nil {
 			log.Printf("[handler] decode error: %v (%d bytes)", err, len(msg))
-			if h.debug && len(msg) > 0 {
+			if h.verbose == "debug" && len(msg) > 0 {
 				log.Printf("[debug] raw frame hex: %s", protocol.HexPreview(msg, 128))
 			}
 			continue
@@ -210,7 +210,7 @@ func (h *ClientHandler) handleHTTPRes(frame protocol.Frame) {
 	resp, err := protocol.DecodeHTTPResponse(frame.Payload)
 	if err != nil {
 		log.Printf("[handler] decode HTTP response error: %v (payload %d bytes)", err, len(frame.Payload))
-		if h.debug && len(frame.Payload) > 0 {
+		if h.verbose == "debug" && len(frame.Payload) > 0 {
 			log.Printf("[debug] response payload hex: %s", protocol.HexPreview(frame.Payload, 256))
 		}
 		return
@@ -293,7 +293,7 @@ func (h *ClientHandler) ForwardWebSocket(tunnelID uint64, req protocol.HTTPReque
 func (h *ClientHandler) forward(tunnelID uint64, req protocol.HTTPRequest, streamData chan []byte) (requestID uint64, resp protocol.HTTPResponse, cleanup func(), err error) {
 	requestID = h.nextRequestID()
 
-	if h.debug {
+	if h.verbose == "debug" {
 		log.Printf("[debug] forward request #%d: %s %s (%d headers, %d body bytes)",
 			requestID, req.Method, req.Path, len(req.Headers), len(req.Body))
 	}
@@ -315,7 +315,7 @@ func (h *ClientHandler) forward(tunnelID uint64, req protocol.HTTPRequest, strea
 		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: encode error: %w", err)
 	}
 
-	if h.debug {
+	if h.verbose == "debug" {
 		log.Printf("[debug] forward payload #%d: %d bytes", requestID, len(payload))
 	}
 
@@ -333,7 +333,7 @@ func (h *ClientHandler) forward(tunnelID uint64, req protocol.HTTPRequest, strea
 		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: timeout after %v", protocol.RequestTimeout)
 	}
 
-	if h.debug {
+	if h.verbose == "debug" {
 		log.Printf("[debug] forward response #%d: status %d (%d headers, %d body bytes)",
 			requestID, resp.StatusCode, len(resp.Headers), len(resp.Body))
 	}

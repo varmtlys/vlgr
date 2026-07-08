@@ -16,11 +16,11 @@ import (
 type ReverseProxy struct {
 	registry   *Registry
 	baseDomain string
-	debug      bool
+	verbose    string
 }
 
-func NewReverseProxy(registry *Registry, baseDomain string, debug bool) *ReverseProxy {
-	return &ReverseProxy{registry: registry, baseDomain: baseDomain, debug: debug}
+func NewReverseProxy(registry *Registry, baseDomain string, verbose string) *ReverseProxy {
+	return &ReverseProxy{registry: registry, baseDomain: baseDomain, verbose: verbose}
 }
 
 func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +46,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[proxy] received %s %s (body: %d bytes)", r.Method, r.URL.EscapedPath(), len(body))
 
-	if p.debug {
+	if p.verbose == "debug" {
 		protocol.DebugLogHeaders("[debug] request", r.Header)
 		if len(body) > 0 {
 			log.Printf("[debug] request body: %s", protocol.TextPreview(body, 200))
@@ -93,7 +93,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if p.debug {
+	if p.verbose == "debug" {
 		log.Printf("[debug] WebSocket upgrade detected for %s", requestPath)
 	}
 	streamData := make(chan []byte, protocol.StreamRelayBuf)
@@ -137,7 +137,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if p.debug {
+	if p.verbose == "debug" {
 		log.Printf("[debug] WebSocket relay started for %s (request #%d)", requestPath, requestID)
 	}
 
@@ -176,7 +176,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 	conn.Close()
 
-	if p.debug {
+	if p.verbose == "debug" {
 		log.Printf("[debug] WebSocket relay ended for %s", requestPath)
 	}
 }

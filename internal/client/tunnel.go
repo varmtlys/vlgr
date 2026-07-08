@@ -44,7 +44,7 @@ type Tunnel struct {
 	ports      []uint16
 	subdomains []string
 	useTLS     bool
-	debug      bool
+	verbose    string
 
 	conn      *websocket.Conn
 	publicURL string
@@ -68,6 +68,7 @@ func NewTunnel(serverAddr, token string, ports []uint16, subdomains []string, us
 		ports:       ports,
 		subdomains:  subdomains,
 		useTLS:      useTLS,
+		verbose:     "info",
 		done:        make(chan struct{}),
 		mappings:    make(map[uint64]uint16),
 		relays:      make(map[uint64]*streamRelay),
@@ -75,8 +76,8 @@ func NewTunnel(serverAddr, token string, ports []uint16, subdomains []string, us
 	}
 }
 
-func (t *Tunnel) SetDebug(enabled bool) {
-	t.debug = enabled
+func (t *Tunnel) SetVerbose(level string) {
+	t.verbose = level
 }
 
 func (t *Tunnel) Connect() error {
@@ -203,7 +204,7 @@ func (t *Tunnel) Run() {
 
 		switch frame.Type {
 		case protocol.MsgHTTPReq:
-			if t.debug {
+			if t.verbose == "debug" {
 				log.Printf("[debug] received HTTP request frame: tunnel=%d request=%d payload=%d bytes",
 					frame.TunnelID, frame.RequestID, len(frame.Payload))
 			}
@@ -300,7 +301,7 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 	req, err := protocol.DecodeHTTPRequest(frame.Payload)
 	if err != nil {
 		log.Printf("[client] decode HTTP request error: %v (payload %d bytes)", err, len(frame.Payload))
-		if t.debug && len(frame.Payload) > 0 {
+		if t.verbose == "debug" && len(frame.Payload) > 0 {
 			log.Printf("[debug] request payload hex: %s", protocol.HexPreview(frame.Payload, 256))
 			log.Printf("[debug] request payload text: %q", protocol.TextPreview(frame.Payload, 200))
 		}
@@ -325,7 +326,7 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 	}
 	log.Printf("[client] proxying %s %s -> localhost:%d (body: %d bytes)", req.Method, req.Path, localPort, len(req.Body))
 
-	if t.debug {
+	if t.verbose == "debug" {
 		protocol.DebugLogHeaders("[debug] request", req.Headers)
 		if len(req.Body) > 0 {
 			log.Printf("[debug] request body: %s", protocol.TextPreview(req.Body, 200))
@@ -333,7 +334,7 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 	}
 
 	targetURL := fmt.Sprintf("http://localhost:%d%s", localPort, req.Path)
-	if t.debug {
+	if t.verbose == "debug" {
 		log.Printf("[debug] forwarding to %s", targetURL)
 	}
 
@@ -369,7 +370,7 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 	statusCode := uint16(httpResp.StatusCode)
 	log.Printf("[client] localhost:%d response: %d %s (%d body bytes)", localPort, statusCode, http.StatusText(int(statusCode)), len(body))
 
-	if t.debug {
+	if t.verbose == "debug" {
 		protocol.DebugLogHeaders("[debug] response", httpResp.Header)
 		if len(body) > 0 {
 			log.Printf("[debug] response body: %s", protocol.TextPreview(body, 200))
@@ -457,7 +458,7 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 
 	release()
 
-	if t.debug {
+	if t.verbose == "debug" {
 		log.Printf("[debug] WebSocket relay started for request #%d", requestID)
 	}
 
@@ -472,7 +473,7 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 			TunnelID:  tunnelID,
 			RequestID: requestID,
 		})
-		if t.debug {
+		if t.verbose == "debug" {
 			log.Printf("[debug] WebSocket relay ended for request #%d", requestID)
 		}
 	}()

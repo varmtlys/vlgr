@@ -17,12 +17,45 @@ import (
 
 var (
 	serverAddr = flag.String("server", "localhost:4443", "Tunnel server address")
-	localPorts = flag.String("local", "", "Local ports to expose, comma-separated (e.g. '8080,3000')")
+	localPorts = flag.String("ports", "", "Local ports to expose, comma-separated (e.g. '8080,3000')")
 	token      = flag.String("token", "", "Authentication token")
-	subdomains = flag.String("subdomain", "", "Request custom subdomains, comma-separated (order matches -local)")
+	subdomains = flag.String("subdomain", "", "Request custom subdomains, comma-separated (order matches -ports)")
 	useTLS     = flag.Bool("tls", false, "Use WSS (TLS) — required when connecting via Caddy/HTTPS")
-	debug      = flag.Bool("debug", false, "Enable verbose debug logging")
+	verbose    = flag.String("verbose", "info", "Log level: info or debug")
+	help       = flag.Bool("h", false, "Show help")
 )
+
+func init() {
+	flag.StringVar(serverAddr, "s", "localhost:4443", "Tunnel server address (shorthand)")
+	flag.StringVar(localPorts, "p", "", "Local ports to expose (shorthand)")
+	flag.StringVar(token, "t", "", "Authentication token (shorthand)")
+	flag.StringVar(subdomains, "u", "", "Request custom subdomains (shorthand)")
+	flag.StringVar(verbose, "v", "info", "Log level (shorthand)")
+
+	flag.Usage = printClientHelp
+}
+
+func printClientHelp() {
+	fmt.Print(`vlgr-client — VLGR tunnel client
+
+Usage:
+  vlgr-client --ports <ports> [flags]
+
+Flags:
+  --server, -s    VLGR server address                            (default localhost:4443)
+  --ports, -p     Local port(s) to expose, comma-separated        (required)
+  --token, -t     Authentication token                            (default empty)
+  --subdomain, -u Request custom subdomain(s), comma-separated    (default auto)
+  --tls           Use WSS (TLS) — required via Caddy/HTTPS        (default false)
+  --verbose, -v   Log level: info (default) or debug
+  --help, -h      Show this help
+
+Examples:
+  vlgr-client -p 3000
+  vlgr-client -s tunnel.domain.com:443 -p 3000 --tls -t mysecret
+  vlgr-client -s tunnel.domain.com:443 -p "8080,3000" -u "api,web" --tls -v debug
+`)
+}
 
 func parsePorts(s string) ([]uint16, error) {
 	parts := strings.Split(s, ",")
@@ -64,12 +97,17 @@ func validateServerAddr(s string) error {
 func main() {
 	flag.Parse()
 
+	if *help {
+		printClientHelp()
+		os.Exit(0)
+	}
+
 	if err := validateServerAddr(*serverAddr); err != nil {
 		log.Fatalf("[client] %v", err)
 	}
 
 	if *localPorts == "" {
-		log.Fatal("please specify -local <port> or -local <port1,port2,...>")
+		log.Fatal("please specify -ports <port> or -ports <port1,port2,...>")
 	}
 
 	ports, err := parsePorts(*localPorts)
@@ -102,7 +140,7 @@ func main() {
 			tunnel.Close()
 		}
 		tunnel = client.NewTunnel(*serverAddr, *token, ports, subs, *useTLS)
-		tunnel.SetDebug(*debug)
+		tunnel.SetVerbose(*verbose)
 
 		if err := tunnel.Connect(); err != nil {
 			log.Printf("[client] connection failed: %v, retrying in %v...", err, backoff)

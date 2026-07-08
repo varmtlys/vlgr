@@ -669,7 +669,7 @@ main() {
   echo -e "  Service:         vlgr-server ($(systemctl is-active vlgr-server 2>/dev/null || echo "not installed"))"
   echo ""
   echo -e "  \033[1;32mConnect a client:\033[0m"
-  echo -e "  ./vlgr-client -server ${DOMAIN}:443 -local 3000 -tls -token ${TOKEN}"
+  echo -e "  ./vlgr-client -s ${DOMAIN}:443 -p 3000 --tls -t ${TOKEN}"
   echo ""
 
   if $INSTALL_CADDY && has_cmd caddy; then

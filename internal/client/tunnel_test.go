@@ -30,18 +30,18 @@ func TestNewTunnel(t *testing.T) {
 	}
 }
 
-func TestTunnel_SetDebug(t *testing.T) {
+func TestTunnel_SetVerbose(t *testing.T) {
 	tun := NewTunnel("x", "", nil, nil, false)
-	if tun.debug {
-		t.Error("debug should be false by default")
+	if tun.verbose != "info" {
+		t.Errorf("verbose should be 'info' by default, got %q", tun.verbose)
 	}
-	tun.SetDebug(true)
-	if !tun.debug {
-		t.Error("debug should be true after SetDebug(true)")
+	tun.SetVerbose("debug")
+	if tun.verbose != "debug" {
+		t.Errorf("verbose should be 'debug' after SetVerbose(\"debug\"), got %q", tun.verbose)
 	}
-	tun.SetDebug(false)
-	if tun.debug {
-		t.Error("debug should be false after SetDebug(false)")
+	tun.SetVerbose("info")
+	if tun.verbose != "info" {
+		t.Errorf("verbose should be 'info' after SetVerbose(\"info\"), got %q", tun.verbose)
 	}
 }
 
