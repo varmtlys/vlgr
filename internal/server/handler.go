@@ -72,6 +72,12 @@ func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain strin
 	return h
 }
 
+func (h *ClientHandler) isAuthenticated() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.authenticated
+}
+
 func (h *ClientHandler) nextRequestID() uint64 {
 	return atomic.AddUint64(&h.requestIDSeq, 1)
 }
@@ -85,12 +91,22 @@ func (h *ClientHandler) removePending(requestID uint64) {
 func (h *ClientHandler) Run() {
 	defer h.cleanup()
 
-	h.conn.SetReadLimit(protocol.MaxBodySize + protocol.HeaderSize)
+	h.conn.SetReadLimit(protocol.MaxFrameSize + protocol.HeaderSize)
 	h.conn.SetReadDeadline(time.Now().Add(protocol.PongWait))
 	h.conn.SetPongHandler(func(string) error {
 		h.conn.SetReadDeadline(time.Now().Add(protocol.PongWait))
 		return nil
 	})
+
+	// Idle unauthenticated connections would hold connSem slots forever
+	// (pings keep them alive) — drop them if auth doesn't arrive in time.
+	authTimer := time.AfterFunc(protocol.AuthTimeout, func() {
+		if !h.isAuthenticated() {
+			log.Printf("[handler] closing connection: no auth within %v", protocol.AuthTimeout)
+			h.cleanup()
+		}
+	})
+	defer authTimer.Stop()
 
 	go h.pingLoop()
 
@@ -118,7 +134,7 @@ func (h *ClientHandler) Run() {
 }
 
 func (h *ClientHandler) handleFrame(frame protocol.Frame) {
-	if !h.authenticated && frame.Type != protocol.MsgAuth {
+	if !h.isAuthenticated() && frame.Type != protocol.MsgAuth {
 		log.Printf("[handler] rejecting message type 0x%02x before auth", frame.Type)
 		h.writeMessage(protocol.MsgAuthErr, 0, 0, []byte("authenticate first"))
 		return
@@ -160,12 +176,16 @@ func (h *ClientHandler) handleAuth(frame protocol.Frame) {
 		gotHash := sha256.Sum256([]byte(token))
 		if subtle.ConstantTimeCompare(h.expectedHash[:], gotHash[:]) != 1 {
 			log.Printf("[handler] auth rejected: invalid token")
+			// Flat cost per attempt to slow down token brute force.
+			time.Sleep(time.Second)
 			h.writeMessage(protocol.MsgAuthErr, 0, 0, []byte("invalid token"))
 			h.cleanup()
 			return
 		}
 	}
+	h.mu.Lock()
 	h.authenticated = true
+	h.mu.Unlock()
 	h.clientVersion = clientVersion
 
 	if clientVersion != "" && clientVersion != version.Version {
@@ -312,12 +332,15 @@ func (h *ClientHandler) ForwardWebSocket(tunnelID uint64, req protocol.HTTPReque
 	return h.forward(tunnelID, req, streamData)
 }
 
-func (h *ClientHandler) forward(tunnelID uint64, req protocol.HTTPRequest, streamData chan []byte) (requestID uint64, resp protocol.HTTPResponse, cleanup func(), err error) {
-	requestID = h.nextRequestID()
+// startForward registers a pending request and sends the MsgHTTPReq frame.
+// The caller must eventually call finishForward (directly or via the cleanup
+// func returned by forward).
+func (h *ClientHandler) startForward(tunnelID uint64, req protocol.HTTPRequest, streamData chan []byte) (uint64, *pendingReq, error) {
+	requestID := h.nextRequestID()
 
 	if h.debug {
-		log.Printf("[debug] forward request #%d: %s %s (%d headers, %d body bytes)",
-			requestID, req.Method, req.Path, len(req.Headers), len(req.Body))
+		log.Printf("[debug] forward request #%d: %s %s (%d headers, %d body bytes, streamed=%v)",
+			requestID, req.Method, req.Path, len(req.Headers), len(req.Body), req.BodyStreamed)
 	}
 
 	pr := &pendingReq{
@@ -331,44 +354,61 @@ func (h *ClientHandler) forward(tunnelID uint64, req protocol.HTTPRequest, strea
 	h.mu.Unlock()
 
 	payload, err := protocol.EncodeHTTPRequest(req)
-	if err != nil {
-		h.removePending(requestID)
-		pr.closeDone()
-		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: encode error: %w", err)
+	if err == nil && len(payload) > protocol.MaxFrameSize {
+		err = fmt.Errorf("encoded request exceeds max frame size: %d > %d", len(payload), protocol.MaxFrameSize)
 	}
-
-	if h.debug {
-		log.Printf("[debug] forward payload #%d: %d bytes", requestID, len(payload))
+	if err != nil {
+		h.finishForward(requestID, pr)
+		return 0, nil, fmt.Errorf("forward: encode error: %w", err)
 	}
 
 	if err := h.writeMessage(protocol.MsgHTTPReq, tunnelID, requestID, payload); err != nil {
-		h.removePending(requestID)
-		pr.closeDone()
-		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: write error: %w", err)
+		h.finishForward(requestID, pr)
+		return 0, nil, fmt.Errorf("forward: write error: %w", err)
 	}
 
+	return requestID, pr, nil
+}
+
+// awaitResponse waits for the MsgHTTPRes frame; on timeout it tears the
+// pending request down.
+func (h *ClientHandler) awaitResponse(requestID uint64, pr *pendingReq, timeout time.Duration) (protocol.HTTPResponse, error) {
 	select {
-	case resp = <-pr.response:
-	case <-time.After(protocol.RequestTimeout):
-		h.removePending(requestID)
-		pr.closeDone()
-		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: timeout after %v", protocol.RequestTimeout)
+	case resp := <-pr.response:
+		if h.debug {
+			log.Printf("[debug] forward response #%d: status %d (%d headers, %d body bytes, streamed=%v)",
+				requestID, resp.StatusCode, len(resp.Headers), len(resp.Body), resp.BodyStreamed)
+		}
+		return resp, nil
+	case <-time.After(timeout):
+		h.finishForward(requestID, pr)
+		return protocol.HTTPResponse{}, fmt.Errorf("forward: timeout after %v", timeout)
+	}
+}
+
+func (h *ClientHandler) finishForward(requestID uint64, pr *pendingReq) {
+	h.removePending(requestID)
+	pr.closeDone()
+}
+
+func (h *ClientHandler) forward(tunnelID uint64, req protocol.HTTPRequest, streamData chan []byte) (requestID uint64, resp protocol.HTTPResponse, cleanup func(), err error) {
+	requestID, pr, err := h.startForward(tunnelID, req, streamData)
+	if err != nil {
+		return 0, protocol.HTTPResponse{}, nil, err
 	}
 
-	if h.debug {
-		log.Printf("[debug] forward response #%d: status %d (%d headers, %d body bytes)",
-			requestID, resp.StatusCode, len(resp.Headers), len(resp.Body))
+	resp, err = h.awaitResponse(requestID, pr, protocol.RequestTimeout)
+	if err != nil {
+		return 0, protocol.HTTPResponse{}, nil, err
 	}
 
 	if streamData == nil {
-		h.removePending(requestID)
-		pr.closeDone()
+		h.finishForward(requestID, pr)
 	}
 
 	return requestID, resp, func() {
 		if streamData != nil {
-			h.removePending(requestID)
-			pr.closeDone()
+			h.finishForward(requestID, pr)
 		}
 	}, nil
 }

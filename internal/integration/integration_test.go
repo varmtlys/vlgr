@@ -726,3 +726,55 @@ func TestHTTPTunnel_MultipleClients(t *testing.T) {
 		t.Errorf("client2: %d", resp2.StatusCode)
 	}
 }
+
+// ─── Streamed body tests ─────────────────────────────────────────────────────
+
+func TestHTTPTunnel_StreamedBodies(t *testing.T) {
+	backend := startBackend(t)
+	defer backend.close()
+
+	srv := startVLGRServer(t, "test.local", "mytoken")
+	defer srv.close()
+
+	tun := connectTunnel(t, srv.wsAddr, "mytoken", []uint16{backend.port()}, nil)
+	sub := extractSubdomain(tun.PublicURL(), "test.local")
+
+	// 10MB body: above InlineBodyLimit, so both the upload and the echoed
+	// response travel as MsgStreamData frames instead of inline payloads.
+	payload := make([]byte, 10<<20)
+	for i := range payload {
+		payload[i] = byte(i * 31)
+	}
+
+	resp, body := httpPost(t, srv.httpAddr, sub+".test.local", "/echo", payload, "application/octet-stream")
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: want 200, got %d", resp.StatusCode)
+	}
+	if len(body) != len(payload) {
+		t.Fatalf("echoed body length: want %d, got %d", len(payload), len(body))
+	}
+	if !bytes.Equal(body, payload) {
+		t.Error("echoed body does not match uploaded payload")
+	}
+}
+
+func TestHTTPTunnel_InlineBodyStillInline(t *testing.T) {
+	backend := startBackend(t)
+	defer backend.close()
+
+	srv := startVLGRServer(t, "test.local", "mytoken")
+	defer srv.close()
+
+	tun := connectTunnel(t, srv.wsAddr, "mytoken", []uint16{backend.port()}, nil)
+	sub := extractSubdomain(tun.PublicURL(), "test.local")
+
+	// Just under the inline limit — must work exactly as before.
+	payload := bytes.Repeat([]byte("x"), int(protocol.InlineBodyLimit)-1)
+	resp, body := httpPost(t, srv.httpAddr, sub+".test.local", "/echo", payload, "text/plain")
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: want 200, got %d", resp.StatusCode)
+	}
+	if !bytes.Equal(body, payload) {
+		t.Error("echoed inline body does not match")
+	}
+}

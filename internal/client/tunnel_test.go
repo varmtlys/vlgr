@@ -121,8 +121,14 @@ func TestHandleHTTPReq_DecodeError(t *testing.T) {
 }
 
 func TestHTTPClient_Configuration(t *testing.T) {
-	if httpClient.Timeout == 0 {
-		t.Error("httpClient should have a timeout")
+	// No global Timeout — it would abort streamed transfers — but response
+	// headers must still be bounded.
+	if httpClient.Timeout != 0 {
+		t.Error("httpClient must not have a global timeout (breaks streamed bodies)")
+	}
+	tr, ok := httpClient.Transport.(*http.Transport)
+	if !ok || tr.ResponseHeaderTimeout == 0 {
+		t.Error("httpClient transport should bound response header time")
 	}
 }
 

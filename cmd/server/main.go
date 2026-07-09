@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
-	"strings"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -72,8 +75,13 @@ var upgrader = websocket.Upgrader{
 		if origin == "" {
 			return true
 		}
-		return strings.HasPrefix(origin, "https://"+r.Host) ||
-			strings.HasPrefix(origin, "http://"+r.Host)
+		// Exact host match: a prefix check would pass
+		// https://host.example.com.evil.com for host.example.com.
+		u, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		return u.Host == r.Host
 	},
 }
 
@@ -131,15 +139,29 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Printf("[server] shutting down...")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		publicSrv.Shutdown(ctx)
+		tunnelSrv.Shutdown(ctx)
+		// Tunnel WebSocket connections are hijacked and outlive Shutdown;
+		// exiting closes them and clients reconnect on their own.
+		os.Exit(0)
+	}()
+
 	go func() {
 		log.Printf("[server] public HTTP listening on %s", *httpAddr)
-		if err := publicSrv.ListenAndServe(); err != nil {
+		if err := publicSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("[server] public HTTP error: %v", err)
 		}
 	}()
 
 	log.Printf("[server] tunnel WebSocket listening on %s", *wsAddr)
-	if err := tunnelSrv.ListenAndServe(); err != nil {
+	if err := tunnelSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("[server] tunnel server error: %v", err)
 	}
 }

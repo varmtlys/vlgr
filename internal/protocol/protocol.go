@@ -28,14 +28,22 @@ const (
 	MsgStreamData  byte = 0x0B
 	MsgStreamClose byte = 0x0C
 
-	HeaderSize    = 21
-	MaxBodySize   = 32 << 20
+	HeaderSize  = 21
+	MaxBodySize = 32 << 20
+	// MaxFrameSize = max body plus headroom for encoded method/path/headers,
+	// so a maximum-size body doesn't overflow the frame limit and kill the
+	// whole tunnel connection.
+	MaxFrameSize  = MaxBodySize + 2<<20
 	StreamBufSize = 32 * 1024
+	// Bodies up to InlineBodyLimit travel inside MsgHTTPReq/MsgHTTPRes as
+	// before; larger bodies are streamed in MsgStreamData chunks.
+	InlineBodyLimit = 4 << 20
 
 	MaxHeaders         = 256
 	MaxValuesPerHeader = 64
 
 	WriteWait        = 10 * time.Second
+	AuthTimeout      = 10 * time.Second
 	PongWait         = 60 * time.Second
 	PingPeriod       = 30 * time.Second
 	RequestTimeout   = 30 * time.Second
@@ -45,6 +53,10 @@ const (
 	StreamRelayBuf      = 256
 	StreamSendTimeout   = 10 * time.Second
 )
+
+// StreamedBodyLen in the body-length field marks a body that follows as
+// MsgStreamData frames instead of being inlined in the payload.
+const StreamedBodyLen uint32 = 0xFFFFFFFF
 
 type Frame struct {
 	Type      byte
@@ -58,12 +70,16 @@ type HTTPRequest struct {
 	Path    string
 	Headers map[string][]string
 	Body    []byte
+	// BodyStreamed means Body is empty and the body arrives as
+	// MsgStreamData frames terminated by MsgStreamClose.
+	BodyStreamed bool
 }
 
 type HTTPResponse struct {
-	StatusCode uint16
-	Headers    map[string][]string
-	Body       []byte
+	StatusCode   uint16
+	Headers      map[string][]string
+	Body         []byte
+	BodyStreamed bool
 }
 
 func EncodeFrame(f Frame) []byte {
@@ -81,8 +97,8 @@ func DecodeFrame(data []byte) (Frame, error) {
 		return Frame{}, fmt.Errorf("frame too short: %d bytes, need at least %d", len(data), HeaderSize)
 	}
 	payloadLen := binary.BigEndian.Uint32(data[17:21])
-	if payloadLen > MaxBodySize {
-		return Frame{}, fmt.Errorf("frame payload exceeds max: %d > %d", payloadLen, MaxBodySize)
+	if payloadLen > MaxFrameSize {
+		return Frame{}, fmt.Errorf("frame payload exceeds max: %d > %d", payloadLen, MaxFrameSize)
 	}
 	if len(data) < HeaderSize+int(payloadLen) {
 		return Frame{}, fmt.Errorf("truncated payload: expected %d, got %d", payloadLen, len(data)-HeaderSize)
@@ -174,24 +190,31 @@ func readHeaders(reader *bytes.Reader) (map[string][]string, error) {
 	return headers, nil
 }
 
-func writeBody(buf *bytes.Buffer, body []byte) {
+func writeBody(buf *bytes.Buffer, body []byte, streamed bool) {
+	if streamed {
+		binary.Write(buf, binary.BigEndian, StreamedBodyLen)
+		return
+	}
 	binary.Write(buf, binary.BigEndian, uint32(len(body)))
 	buf.Write(body)
 }
 
-func readBody(reader *bytes.Reader) ([]byte, error) {
+func readBody(reader *bytes.Reader) (body []byte, streamed bool, err error) {
 	var bodyLen uint32
 	if err := binary.Read(reader, binary.BigEndian, &bodyLen); err != nil {
-		return nil, fmt.Errorf("read body length: %w", err)
+		return nil, false, fmt.Errorf("read body length: %w", err)
+	}
+	if bodyLen == StreamedBodyLen {
+		return nil, true, nil
 	}
 	if bodyLen > MaxBodySize {
-		return nil, fmt.Errorf("body too large: %d > %d", bodyLen, MaxBodySize)
+		return nil, false, fmt.Errorf("body too large: %d > %d", bodyLen, MaxBodySize)
 	}
-	body := make([]byte, bodyLen)
+	body = make([]byte, bodyLen)
 	if _, err := io.ReadFull(reader, body); err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
+		return nil, false, fmt.Errorf("read body: %w", err)
 	}
-	return body, nil
+	return body, false, nil
 }
 
 func EncodeHTTPRequest(req HTTPRequest) ([]byte, error) {
@@ -205,7 +228,7 @@ func EncodeHTTPRequest(req HTTPRequest) ([]byte, error) {
 	if err := writeHeaders(&buf, req.Headers); err != nil {
 		return nil, err
 	}
-	writeBody(&buf, req.Body)
+	writeBody(&buf, req.Body, req.BodyStreamed)
 	return buf.Bytes(), nil
 }
 
@@ -231,7 +254,7 @@ func DecodeHTTPRequest(data []byte) (HTTPRequest, error) {
 	}
 	req.Headers = headers
 
-	if req.Body, err = readBody(reader); err != nil {
+	if req.Body, req.BodyStreamed, err = readBody(reader); err != nil {
 		return req, err
 	}
 	return req, nil
@@ -243,7 +266,7 @@ func EncodeHTTPResponse(resp HTTPResponse) ([]byte, error) {
 	if err := writeHeaders(&buf, resp.Headers); err != nil {
 		return nil, err
 	}
-	writeBody(&buf, resp.Body)
+	writeBody(&buf, resp.Body, resp.BodyStreamed)
 	return buf.Bytes(), nil
 }
 
@@ -261,7 +284,7 @@ func DecodeHTTPResponse(data []byte) (HTTPResponse, error) {
 	}
 	resp.Headers = headers
 
-	if resp.Body, err = readBody(reader); err != nil {
+	if resp.Body, resp.BodyStreamed, err = readBody(reader); err != nil {
 		return resp, err
 	}
 	return resp, nil

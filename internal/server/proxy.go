@@ -36,15 +36,16 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, protocol.MaxBodySize)
-	body, err := io.ReadAll(r.Body)
+	// Read up to InlineBodyLimit; anything larger is streamed in chunks
+	// after the header frame, so there is no upper bound on body size.
+	body, err := io.ReadAll(io.LimitReader(r.Body, protocol.InlineBodyLimit+1))
 	if err != nil {
-		http.Error(w, "request body too large or read error", http.StatusRequestEntityTooLarge)
+		http.Error(w, "request body read error", http.StatusBadRequest)
 		return
 	}
-	r.Body.Close()
+	streamedReq := len(body) > protocol.InlineBodyLimit
 
-	log.Printf("[proxy] received %s %s (body: %d bytes)", r.Method, r.URL.EscapedPath(), len(body))
+	log.Printf("[proxy] received %s %s (body: %d bytes, streamed: %v)", r.Method, r.URL.EscapedPath(), len(body), streamedReq)
 
 	if p.debug {
 		protocol.DebugLogHeaders("[debug] request", r.Header)
@@ -67,7 +68,9 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		headers["X-Forwarded-Proto"] = []string{proto}
 	}
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		headers["X-Forwarded-For"] = append(headers["X-Forwarded-For"], host)
+		// Copy before append: the slice is shared with r.Header.
+		xff := append([]string(nil), headers["X-Forwarded-For"]...)
+		headers["X-Forwarded-For"] = append(xff, host)
 	}
 
 	requestPath := r.URL.EscapedPath()
@@ -81,19 +84,102 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Headers: headers,
 		Body:    body,
 	}
+	if streamedReq {
+		req.Body = nil
+		req.BodyStreamed = true
+	}
 
-	if !protocol.IsWebSocketUpgrade(r) {
-		resp, err := tunnel.Handler.ForwardHTTP(tunnel.ID, req)
-		if err != nil {
-			log.Printf("[proxy] forward error for %s: %v", subdomain, err)
-			http.Error(w, "tunnel error", http.StatusBadGateway)
-			return
-		}
-		writeNormalResponse(w, resp)
+	if protocol.IsWebSocketUpgrade(r) {
+		p.serveWebSocket(w, tunnel, req, subdomain)
 		return
 	}
 
-	p.serveWebSocket(w, tunnel, req, subdomain)
+	// streamData always exists: we don't know in advance whether the
+	// client will stream the response body.
+	streamData := make(chan []byte, protocol.StreamRelayBuf)
+	requestID, pr, err := tunnel.Handler.startForward(tunnel.ID, req, streamData)
+	if err != nil {
+		log.Printf("[proxy] forward error for %s: %v", subdomain, err)
+		http.Error(w, "tunnel error", http.StatusBadGateway)
+		return
+	}
+	defer tunnel.Handler.finishForward(requestID, pr)
+
+	timeout := protocol.RequestTimeout
+	if streamedReq {
+		// The response only arrives after the upload finishes; allow
+		// large uploads more time than a regular request.
+		timeout = protocol.RelayIdleTimeout
+		go pumpRequestBody(tunnel.Handler, requestID, body, r.Body, pr.done)
+	}
+
+	resp, err := tunnel.Handler.awaitResponse(requestID, pr, timeout)
+	if err != nil {
+		log.Printf("[proxy] forward error for %s: %v", subdomain, err)
+		http.Error(w, "tunnel error", http.StatusBadGateway)
+		return
+	}
+
+	if !resp.BodyStreamed {
+		writeNormalResponse(w, resp)
+		return
+	}
+	p.streamResponse(w, tunnel.Handler, requestID, resp, streamData)
+}
+
+// pumpRequestBody sends the buffered prefix and the rest of the request body
+// as stream frames, terminated by MsgStreamClose (body EOF for the client).
+func pumpRequestBody(h *ClientHandler, requestID uint64, prefix []byte, rest io.Reader, done <-chan struct{}) {
+	defer h.SendStreamClose(requestID)
+	if err := h.SendStreamData(requestID, prefix); err != nil {
+		return
+	}
+	buf := make([]byte, protocol.StreamBufSize)
+	for {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		n, err := rest.Read(buf)
+		if n > 0 {
+			if werr := h.SendStreamData(requestID, buf[:n]); werr != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// streamResponse writes the response headers, then relays body chunks until
+// the client sends MsgStreamClose (channel closed) or the relay idles out.
+func (p *ReverseProxy) streamResponse(w http.ResponseWriter, h *ClientHandler, requestID uint64, resp protocol.HTTPResponse, streamData <-chan []byte) {
+	// Tell the client to stop pumping if we exit early (e.g. viewer gone).
+	defer h.SendStreamClose(requestID)
+
+	copyValidHeaders(resp.Headers, w.Header().Add)
+	w.WriteHeader(int(resp.StatusCode))
+	flusher, _ := w.(http.Flusher)
+
+	for {
+		select {
+		case data, ok := <-streamData:
+			if !ok {
+				return
+			}
+			if _, err := w.Write(data); err != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		case <-time.After(protocol.RelayIdleTimeout):
+			log.Printf("[proxy] streamed response idle timeout for request #%d", requestID)
+			return
+		}
+	}
 }
 
 // serveWebSocket forwards an Upgrade request through the tunnel and, on 101,
