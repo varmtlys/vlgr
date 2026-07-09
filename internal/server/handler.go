@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"vlgr/internal/protocol"
+	"vlgr/internal/version"
 )
 
 type pendingReq struct {
@@ -42,6 +43,7 @@ type ClientHandler struct {
 	expectedToken string
 	expectedHash  [32]byte
 	authenticated bool
+	clientVersion string
 	debug         bool
 
 	pending      map[uint64]*pendingReq
@@ -146,8 +148,16 @@ func (h *ClientHandler) pingLoop() {
 }
 
 func (h *ClientHandler) handleAuth(frame protocol.Frame) {
+	token, clientVersion, err := protocol.DecodeAuth(frame.Payload)
+	if err != nil {
+		log.Printf("[handler] auth rejected: malformed auth payload: %v", err)
+		h.writeMessage(protocol.MsgAuthErr, 0, 0, []byte("malformed auth"))
+		h.cleanup()
+		return
+	}
+
 	if h.expectedToken != "" {
-		gotHash := sha256.Sum256(frame.Payload)
+		gotHash := sha256.Sum256([]byte(token))
 		if subtle.ConstantTimeCompare(h.expectedHash[:], gotHash[:]) != 1 {
 			log.Printf("[handler] auth rejected: invalid token")
 			h.writeMessage(protocol.MsgAuthErr, 0, 0, []byte("invalid token"))
@@ -156,8 +166,20 @@ func (h *ClientHandler) handleAuth(frame protocol.Frame) {
 		}
 	}
 	h.authenticated = true
+	h.clientVersion = clientVersion
+
+	if clientVersion != "" && clientVersion != version.Version {
+		log.Printf("[handler] WARNING: version mismatch — client %q vs server %q; connection may be unstable", clientVersion, version.Version)
+	}
+
+	authOKPayload, err := protocol.EncodeAuthOK(version.Version)
+	if err != nil {
+		log.Printf("[handler] encode auth ok: %v", err)
+		h.writeMessage(protocol.MsgAuthOK, 0, 0, nil)
+		return
+	}
+	h.writeMessage(protocol.MsgAuthOK, 0, 0, authOKPayload)
 	log.Printf("[handler] client authenticated")
-	h.writeMessage(protocol.MsgAuthOK, 0, 0, nil)
 }
 
 func (h *ClientHandler) handleRegister(frame protocol.Frame) {

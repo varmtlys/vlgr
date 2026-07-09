@@ -176,7 +176,8 @@ func TestHandleAuth_InvalidToken(t *testing.T) {
 	}
 	h.expectedHash = sha256.Sum256([]byte("secret"))
 
-	h.handleAuth(protocol.Frame{Payload: []byte("wrong")})
+	payload, _ := protocol.EncodeAuth("wrong", "v1.0.0")
+	h.handleAuth(protocol.Frame{Payload: payload})
 	if h.authenticated {
 		t.Error("should not authenticate with wrong token")
 	}
@@ -192,7 +193,8 @@ func TestHandleAuth_ValidToken(t *testing.T) {
 	}
 	h.expectedHash = sha256.Sum256([]byte("secret"))
 
-	h.handleAuth(protocol.Frame{Payload: []byte("secret")})
+	payload, _ := protocol.EncodeAuth("secret", "v1.0.0")
+	h.handleAuth(protocol.Frame{Payload: payload})
 	if !h.authenticated {
 		t.Error("should authenticate with correct token")
 	}
@@ -207,9 +209,45 @@ func TestHandleAuth_EmptyToken(t *testing.T) {
 		done:          make(chan struct{}),
 	}
 
-	h.handleAuth(protocol.Frame{Payload: []byte("anything")})
+	payload, _ := protocol.EncodeAuth("anything", "v1.0.0")
+	h.handleAuth(protocol.Frame{Payload: payload})
 	if !h.authenticated {
 		t.Error("should authenticate with empty expected token")
+	}
+}
+
+func TestHandleAuth_MalformedPayload(t *testing.T) {
+	h := &ClientHandler{
+		expectedToken: "",
+		registry:      NewRegistry(),
+		tunnels:       make(map[uint64]*Tunnel),
+		pending:       make(map[uint64]*pendingReq),
+		done:          make(chan struct{}),
+	}
+
+	h.handleAuth(protocol.Frame{Payload: []byte{0xFF}})
+	if h.authenticated {
+		t.Error("should not authenticate with malformed payload")
+	}
+}
+
+func TestHandleAuth_StoresClientVersion(t *testing.T) {
+	h := &ClientHandler{
+		expectedToken: "secret",
+		registry:      NewRegistry(),
+		tunnels:       make(map[uint64]*Tunnel),
+		pending:       make(map[uint64]*pendingReq),
+		done:          make(chan struct{}),
+	}
+	h.expectedHash = sha256.Sum256([]byte("secret"))
+
+	payload, _ := protocol.EncodeAuth("secret", "v9.9.9")
+	h.handleAuth(protocol.Frame{Payload: payload})
+	if !h.authenticated {
+		t.Fatal("should authenticate with correct token")
+	}
+	if h.clientVersion != "v9.9.9" {
+		t.Errorf("clientVersion: want %q, got %q", "v9.9.9", h.clientVersion)
 	}
 }
 

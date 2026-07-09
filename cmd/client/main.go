@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"vlgr/internal/client"
+	"vlgr/internal/version"
 )
 
 var (
@@ -27,6 +28,7 @@ var (
 	verbose    = flag.String("verbose", "info", "Log level: info or debug")
 	addPorts   = flag.String("add", "", "Add a port with subdomain to running instance: '<port> <subdomain>'")
 	help       = flag.Bool("h", false, "Show help")
+	showVer    = flag.Bool("version", false, "Show version")
 )
 
 func init() {
@@ -34,13 +36,15 @@ func init() {
 	flag.StringVar(localPorts, "p", "", "Local ports to expose (shorthand)")
 	flag.StringVar(token, "t", "", "Authentication token (shorthand)")
 	flag.StringVar(subdomains, "u", "", "Request custom subdomains (shorthand)")
-	flag.StringVar(verbose, "v", "info", "Log level (shorthand)")
+	flag.StringVar(verbose, "V", "info", "Log level (shorthand)")
+	flag.BoolVar(showVer, "v", false, "Show version (shorthand)")
 
 	flag.Usage = printClientHelp
 }
 
 func printClientHelp() {
 	fmt.Print(`vlgr-client — VLGR tunnel client
+Version: ` + version.String() + `
 
 Usage:
   vlgr-client --ports <ports> [flags]
@@ -52,14 +56,15 @@ Flags:
   --token, -t     Authentication token                            (default empty)
   --subdomain, -u Request custom subdomain(s), comma-separated    (default auto)
   --tls           Use WSS (TLS) — required via Caddy/HTTPS        (default false)
-  --verbose, -v   Log level: info (default) or debug
+  --verbose, -V   Log level: info (default) or debug
   --add           Add a port with subdomain to running instance   (e.g. "5000 mysub")
+  --version, -v   Show version and exit
   --help, -h      Show this help
 
 Examples:
   vlgr-client -p 3000
   vlgr-client -s tunnel.domain.com:443 -p 3000 --tls -t mysecret
-  vlgr-client -s tunnel.domain.com:443 -p "8080,3000" -u "api,web" --tls -v debug
+  vlgr-client -s tunnel.domain.com:443 -p "8080,3000" -u "api,web" --tls -V debug
   vlgr-client --add "5000 mysub"
 `)
 }
@@ -163,6 +168,11 @@ func main() {
 
 	if *help {
 		printClientHelp()
+		os.Exit(0)
+	}
+
+	if *showVer {
+		fmt.Printf("vlgr-client %s\n", version.String())
 		os.Exit(0)
 	}
 

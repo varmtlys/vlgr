@@ -16,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"vlgr/internal/protocol"
+	"vlgr/internal/version"
 )
 
 var httpClient = &http.Client{
@@ -109,9 +110,13 @@ func (t *Tunnel) Connect() error {
 	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	t.conn = conn
 
+	authPayload, err := protocol.EncodeAuth(t.token, version.Version)
+	if err != nil {
+		return fmt.Errorf("encode auth: %w", err)
+	}
 	authFrame := protocol.EncodeFrame(protocol.Frame{
 		Type:    protocol.MsgAuth,
-		Payload: []byte(t.token),
+		Payload: authPayload,
 	})
 	if err := conn.WriteMessage(websocket.BinaryMessage, authFrame); err != nil {
 		return fmt.Errorf("send auth: %w", err)
@@ -130,6 +135,13 @@ func (t *Tunnel) Connect() error {
 	}
 	if authResp.Type != protocol.MsgAuthOK {
 		return fmt.Errorf("unexpected auth response type: 0x%02x", authResp.Type)
+	}
+
+	serverVersion, err := protocol.DecodeAuthOK(authResp.Payload)
+	if err != nil {
+		log.Printf("[client] warning: could not decode server version: %v", err)
+	} else if serverVersion != "" && serverVersion != version.Version {
+		log.Printf("[client] WARNING: version mismatch — client %q vs server %q; connection may be unstable", version.Version, serverVersion)
 	}
 	log.Printf("[client] authenticated")
 

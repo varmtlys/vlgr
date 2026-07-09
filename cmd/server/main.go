@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"vlgr/internal/server"
+	"vlgr/internal/version"
 )
 
 var (
@@ -21,6 +22,7 @@ var (
 	token    = flag.String("token", "", "Required authentication token for clients (empty = no auth)")
 	verbose  = flag.String("verbose", "info", "Log level: info or debug")
 	help     = flag.Bool("h", false, "Show help")
+	showVer  = flag.Bool("version", false, "Show version")
 )
 
 func init() {
@@ -28,13 +30,15 @@ func init() {
 	flag.StringVar(httpAddr, "w", ":8080", "HTTP listen address (shorthand)")
 	flag.StringVar(domain, "d", "localhost:8080", "Base domain (shorthand)")
 	flag.StringVar(token, "t", "", "Authentication token (shorthand)")
-	flag.StringVar(verbose, "v", "info", "Log level (shorthand)")
+	flag.StringVar(verbose, "V", "info", "Log level (shorthand)")
+	flag.BoolVar(showVer, "v", false, "Show version (shorthand)")
 
 	flag.Usage = printServerHelp
 }
 
 func printServerHelp() {
 	fmt.Print(`vlgr-server — VLGR tunnel relay server
+Version: ` + version.String() + `
 
 Usage:
   vlgr-server [flags]
@@ -44,7 +48,8 @@ Flags:
   --http, -w    HTTP listen address for public traffic        (default :8080)
   --domain, -d  Base domain for tunnel URLs                   (default localhost:8080)
   --token, -t   Auth token for clients (empty = no auth)
-  --verbose, -v Log level: info (default) or debug
+  --verbose, -V Log level: info (default) or debug
+  --version, -v Show version and exit
   --help, -h    Show this help
 
 Environment:
@@ -53,7 +58,7 @@ Environment:
 Examples:
   vlgr-server
   vlgr-server -a :4443 -w :8080 -d tunnel.domain.com -t mysecret
-  vlgr-server --addr 127.0.0.1:4443 --http 127.0.0.1:8080 --domain tunnel.example.com -v debug
+  vlgr-server --addr 127.0.0.1:4443 --http 127.0.0.1:8080 --domain tunnel.example.com -V debug
 `)
 }
 
@@ -77,6 +82,11 @@ func main() {
 
 	if *help {
 		printServerHelp()
+		os.Exit(0)
+	}
+
+	if *showVer {
+		fmt.Printf("vlgr-server %s\n", version.String())
 		os.Exit(0)
 	}
 

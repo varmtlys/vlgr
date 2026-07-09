@@ -334,7 +334,8 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 | `--http` | `-w` | `:8080` | HTTP listen address for public traffic |
 | `--domain` | `-d` | `localhost:8080` | Base domain for tunnel URLs (e.g. `tunnel.domain.com`) |
 | `--token` | `-t` | `""` | Auth token for clients (empty = no auth, or set `VLGR_TOKEN` env) |
-| `--verbose` | `-v` | `info` | Log level: `info` (default) or `debug` |
+| `--verbose` | `-V` | `info` | Log level: `info` (default) or `debug` |
+| `--version` | `-v` | | Show version and exit |
 | `--help` | `-h` | | Show help with usage examples |
 
 ### Client (`cmd/client`)
@@ -346,8 +347,9 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 | `--token` | `-t` | `""` | Authentication token (required when server has `--token` set) |
 | `--subdomain` | `-u` | auto | Request custom subdomain(s), comma-separated — order matches `--ports` |
 | `--tls` | | `false` | Use WSS (TLS) — required when connecting via Caddy/HTTPS |
-| `--verbose` | `-v` | `info` | Log level: `info` (default) or `debug` |
+| `--verbose` | `-V` | `info` | Log level: `info` (default) or `debug` |
 | `--add` | | | Add a port with subdomain to running instance: `"<port> <subdomain>"` |
+| `--version` | `-v` | | Show version and exit |
 | `--help` | `-h` | | Show help with usage examples |
 
 ---

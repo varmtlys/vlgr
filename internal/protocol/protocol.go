@@ -350,6 +350,87 @@ func DecodeRegisterOK(payload []byte) (publicURL string, tunnelID uint64, err er
 	return string(payload[1 : 1+n]), binary.BigEndian.Uint64(payload[1+n:]), nil
 }
 
+// Auth payload: [tokenLen uint16][token][versionLen uint16][version].
+// AuthOK payload: [versionLen uint16][serverVersion].
+// Exchanged during the handshake so both sides can compare versions and warn
+// on mismatch. version may be empty for older clients.
+
+const MaxVersionLen = 255
+
+func EncodeAuth(token, clientVersion string) ([]byte, error) {
+	if len(token) > maxStringLen {
+		return nil, fmt.Errorf("token too long: %d > %d", len(token), maxStringLen)
+	}
+	if len(clientVersion) > MaxVersionLen {
+		return nil, fmt.Errorf("version too long: %d > %d", len(clientVersion), MaxVersionLen)
+	}
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.BigEndian, uint16(len(token)))
+	buf.WriteString(token)
+	binary.Write(&buf, binary.BigEndian, uint16(len(clientVersion)))
+	buf.WriteString(clientVersion)
+	return buf.Bytes(), nil
+}
+
+func DecodeAuth(payload []byte) (token, clientVersion string, err error) {
+	reader := bytes.NewReader(payload)
+	var tokenLen uint16
+	if err = binary.Read(reader, binary.BigEndian, &tokenLen); err != nil {
+		return "", "", fmt.Errorf("read token length: %w", err)
+	}
+	if int(tokenLen) > reader.Len() {
+		return "", "", fmt.Errorf("token length %d exceeds remaining %d", tokenLen, reader.Len())
+	}
+	tokenBytes := make([]byte, tokenLen)
+	if _, err = io.ReadFull(reader, tokenBytes); err != nil {
+		return "", "", fmt.Errorf("read token: %w", err)
+	}
+	token = string(tokenBytes)
+
+	var verLen uint16
+	if err = binary.Read(reader, binary.BigEndian, &verLen); err != nil {
+		return token, "", nil
+	}
+	if int(verLen) > reader.Len() {
+		return token, "", fmt.Errorf("version length %d exceeds remaining %d", verLen, reader.Len())
+	}
+	verBytes := make([]byte, verLen)
+	if _, err = io.ReadFull(reader, verBytes); err != nil {
+		return token, "", fmt.Errorf("read version: %w", err)
+	}
+	clientVersion = string(verBytes)
+	return token, clientVersion, nil
+}
+
+func EncodeAuthOK(serverVersion string) ([]byte, error) {
+	if len(serverVersion) > MaxVersionLen {
+		return nil, fmt.Errorf("version too long: %d > %d", len(serverVersion), MaxVersionLen)
+	}
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.BigEndian, uint16(len(serverVersion)))
+	buf.WriteString(serverVersion)
+	return buf.Bytes(), nil
+}
+
+func DecodeAuthOK(payload []byte) (string, error) {
+	if len(payload) == 0 {
+		return "", nil
+	}
+	reader := bytes.NewReader(payload)
+	var verLen uint16
+	if err := binary.Read(reader, binary.BigEndian, &verLen); err != nil {
+		return "", fmt.Errorf("read version length: %w", err)
+	}
+	if int(verLen) > reader.Len() {
+		return "", fmt.Errorf("version length %d exceeds remaining %d", verLen, reader.Len())
+	}
+	verBytes := make([]byte, verLen)
+	if _, err := io.ReadFull(reader, verBytes); err != nil {
+		return "", fmt.Errorf("read version: %w", err)
+	}
+	return string(verBytes), nil
+}
+
 // PingLoop sends WebSocket pings every PingPeriod until done closes or a
 // write fails. Shared by client and server (DRY).
 func PingLoop(conn *websocket.Conn, writeMu *sync.Mutex, done <-chan struct{}) {

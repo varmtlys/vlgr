@@ -322,12 +322,25 @@ build_server() {
     log "Source: $(git log --oneline -1 2>/dev/null || echo 'unknown')"
   fi
 
+  local git_version="dev"
+  if has_cmd git; then
+    git_version="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+  fi
+  local git_commit="unknown"
+  if has_cmd git; then
+    git_commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  fi
+  local build_date
+  build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local version_ldflags
+  version_ldflags="-X vlgr/internal/version.Version=${git_version} -X vlgr/internal/version.GitCommit=${git_commit} -X vlgr/internal/version.BuildDate=${build_date}"
+
   log "Downloading Go dependencies..."
   go mod tidy
 
-  log "Building vlgr-server..."
+  log "Building vlgr-server (${git_version})..."
   mkdir -p "${INSTALL_PATH}/bin"
-  CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "${INSTALL_PATH}/bin/vlgr-server" ./cmd/server
+  CGO_ENABLED=0 go build -trimpath -ldflags="-s -w ${version_ldflags}" -o "${INSTALL_PATH}/bin/vlgr-server" ./cmd/server
 
   if [[ ! -f "${INSTALL_PATH}/bin/vlgr-server" ]]; then
     err "Build failed"
@@ -335,6 +348,7 @@ build_server() {
   fi
 
   log "Server binary: ${INSTALL_PATH}/bin/vlgr-server ($(du -h "${INSTALL_PATH}/bin/vlgr-server" | cut -f1))"
+  log "Built version: $(${INSTALL_PATH}/bin/vlgr-server --version 2>/dev/null || echo 'unknown')"
 }
 
 # ─── Create user ──────────────────────────────────────────────────────────────
@@ -657,11 +671,17 @@ main() {
   fi
 
   # ─── Summary ────────────────────────────────────────────────────────────────
+  local deployed_version="unknown"
+  if [[ -x "${INSTALL_PATH}/bin/vlgr-server" ]]; then
+    deployed_version="$(${INSTALL_PATH}/bin/vlgr-server --version 2>/dev/null || echo 'unknown')"
+  fi
+
   echo ""
   echo -e "\033[1;36m========================================\033[0m"
   echo -e "\033[1;32m  VLGR Server deployed successfully!\033[0m"
   echo -e "\033[1;36m========================================\033[0m"
   echo ""
+  echo -e "  Version:         \033[1;33m${deployed_version}\033[0m"
   echo -e "  Domain:          \033[1;33m${DOMAIN}\033[0m"
   echo -e "  Auth token:      \033[1;33m${TOKEN}\033[0m"
   echo -e "  Binary:          ${INSTALL_PATH}/bin/vlgr-server"
