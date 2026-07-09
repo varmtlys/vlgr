@@ -211,7 +211,7 @@ func main() {
 		os.Remove(ctlFilePath())
 
 		tunnel = client.NewTunnel(*serverAddr, *token, ports, subs, *useTLS)
-		tunnel.SetVerbose(*verbose)
+		tunnel.SetDebug(*verbose == "debug")
 
 		if err := tunnel.Connect(); err != nil {
 			log.Printf("[client] connection failed: %v, retrying in %v...", err, backoff)

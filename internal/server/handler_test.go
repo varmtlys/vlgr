@@ -101,7 +101,7 @@ func TestHandleRegister_PublicURLTooLong(t *testing.T) {
 		registry:      NewRegistry(),
 		tunnels:       make(map[uint64]*Tunnel),
 		pending:       make(map[uint64]*pendingReq),
-		baseDomain:    "very-long-base-domain-name-that-makes-url-exceed-255-chars-total." +
+		baseDomain: "very-long-base-domain-name-that-makes-url-exceed-255-chars-total." +
 			"very-long-base-domain-name-that-makes-url-exceed-255-chars-total." +
 			"very-long-base-domain-name-that-makes-url-exceed-255-chars-total." +
 			"very-long-base-domain-name-that-makes-url-exceed-255-chars-total.com",
@@ -662,8 +662,7 @@ func TestHandleRegister_MaxTunnelsPerClient(t *testing.T) {
 	}
 	for i := 0; i < protocol.MaxTunnelsPerClient; i++ {
 		payload := make([]byte, 2)
-		payload[0] = byte(3000 + i >> 8)
-		payload[1] = byte(3000 + i)
+		binary.BigEndian.PutUint16(payload, uint16(3000+i))
 		h.handleRegister(protocol.Frame{Payload: payload})
 	}
 	if len(h.tunnels) != protocol.MaxTunnelsPerClient {

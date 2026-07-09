@@ -30,18 +30,18 @@ func TestNewTunnel(t *testing.T) {
 	}
 }
 
-func TestTunnel_SetVerbose(t *testing.T) {
+func TestTunnel_SetDebug(t *testing.T) {
 	tun := NewTunnel("x", "", nil, nil, false)
-	if tun.verbose != "info" {
-		t.Errorf("verbose should be 'info' by default, got %q", tun.verbose)
+	if tun.debug {
+		t.Error("debug should be off by default")
 	}
-	tun.SetVerbose("debug")
-	if tun.verbose != "debug" {
-		t.Errorf("verbose should be 'debug' after SetVerbose(\"debug\"), got %q", tun.verbose)
+	tun.SetDebug(true)
+	if !tun.debug {
+		t.Error("debug should be on after SetDebug(true)")
 	}
-	tun.SetVerbose("info")
-	if tun.verbose != "info" {
-		t.Errorf("verbose should be 'info' after SetVerbose(\"info\"), got %q", tun.verbose)
+	tun.SetDebug(false)
+	if tun.debug {
+		t.Error("debug should be off after SetDebug(false)")
 	}
 }
 
@@ -214,9 +214,9 @@ func TestHTTPRequest_HeaderFiltering(t *testing.T) {
 		Method: "POST",
 		Path:   "/api",
 		Headers: map[string][]string{
-			"Content-Length":   {"100"},
+			"Content-Length":    {"100"},
 			"Transfer-Encoding": {"chunked"},
-			"X-Custom":         {"test"},
+			"X-Custom":          {"test"},
 		},
 		Body: []byte("data"),
 	}
@@ -379,8 +379,13 @@ func (e *testNetError) Temporary() bool { return false }
 
 func newTestConn() *testConn { return &testConn{} }
 
-func (c *testConn) Read(b []byte) (int, error)  { return 0, &net.OpError{Op: "read", Err: errTestClosed} }
-func (c *testConn) Write(b []byte) (int, error) { return 0, &net.OpError{Op: "write", Err: errTestClosed} }
+func (c *testConn) Read(b []byte) (int, error) {
+	return 0, &net.OpError{Op: "read", Err: errTestClosed}
+}
+
+func (c *testConn) Write(b []byte) (int, error) {
+	return 0, &net.OpError{Op: "write", Err: errTestClosed}
+}
 func (c *testConn) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

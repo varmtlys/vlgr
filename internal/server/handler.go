@@ -15,11 +15,11 @@ import (
 )
 
 type pendingReq struct {
-	response    chan protocol.HTTPResponse
-	streamData  chan []byte
-	done        chan struct{}
-	doneOnce    sync.Once
-	streamOnce  sync.Once
+	response   chan protocol.HTTPResponse
+	streamData chan []byte
+	done       chan struct{}
+	doneOnce   sync.Once
+	streamOnce sync.Once
 }
 
 func (pr *pendingReq) closeDone() {
@@ -42,7 +42,7 @@ type ClientHandler struct {
 	expectedToken string
 	expectedHash  [32]byte
 	authenticated bool
-	verbose       string
+	debug         bool
 
 	pending      map[uint64]*pendingReq
 	mu           sync.Mutex
@@ -53,14 +53,14 @@ type ClientHandler struct {
 	closeOnce sync.Once
 }
 
-func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain string, expectedToken string, verbose string) *ClientHandler {
+func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain string, expectedToken string, debug bool) *ClientHandler {
 	h := &ClientHandler{
 		conn:          conn,
 		registry:      registry,
 		tunnels:       make(map[uint64]*Tunnel),
 		baseDomain:    baseDomain,
 		expectedToken: expectedToken,
-		verbose:       verbose,
+		debug:         debug,
 		pending:       make(map[uint64]*pendingReq),
 		done:          make(chan struct{}),
 	}
@@ -105,7 +105,7 @@ func (h *ClientHandler) Run() {
 		frame, err := protocol.DecodeFrame(msg)
 		if err != nil {
 			log.Printf("[handler] decode error: %v (%d bytes)", err, len(msg))
-			if h.verbose == "debug" && len(msg) > 0 {
+			if h.debug && len(msg) > 0 {
 				log.Printf("[debug] raw frame hex: %s", protocol.HexPreview(msg, 128))
 			}
 			continue
@@ -163,15 +163,15 @@ func (h *ClientHandler) handleAuth(frame protocol.Frame) {
 func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 	localPort, requestedSubdomain, err := protocol.DecodeRegister(frame.Payload)
 	if err != nil {
-		h.writeMessage(protocol.MsgRegisterErr, 0, 0, []byte(err.Error()))
+		h.registerErr(err.Error())
 		return
 	}
 	if localPort == 0 {
-		h.writeError(0, "invalid port: 0")
+		h.registerErr("invalid port: 0")
 		return
 	}
 	if !validSubdomain(requestedSubdomain) {
-		h.writeError(0, "invalid subdomain characters")
+		h.registerErr("invalid subdomain characters")
 		return
 	}
 	if requestedSubdomain == "" {
@@ -180,20 +180,20 @@ func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 
 	publicURL := fmt.Sprintf("%s.%s", requestedSubdomain, h.baseDomain)
 	if len(publicURL) > 255 {
-		h.writeMessage(protocol.MsgRegisterErr, 0, 0, []byte("public URL too long"))
+		h.registerErr("public URL too long")
 		return
 	}
 
 	h.mu.Lock()
 	if h.tunnelCount >= protocol.MaxTunnelsPerClient {
 		h.mu.Unlock()
-		h.writeError(0, fmt.Sprintf("too many tunnels: max %d per client", protocol.MaxTunnelsPerClient))
+		h.registerErr(fmt.Sprintf("too many tunnels: max %d per client", protocol.MaxTunnelsPerClient))
 		return
 	}
 	tunnel, err := h.registry.Register(requestedSubdomain, h)
 	if err != nil {
 		h.mu.Unlock()
-		h.writeMessage(protocol.MsgRegisterErr, 0, 0, []byte(err.Error()))
+		h.registerErr(err.Error())
 		return
 	}
 	h.tunnels[tunnel.ID] = tunnel
@@ -210,7 +210,7 @@ func (h *ClientHandler) handleHTTPRes(frame protocol.Frame) {
 	resp, err := protocol.DecodeHTTPResponse(frame.Payload)
 	if err != nil {
 		log.Printf("[handler] decode HTTP response error: %v (payload %d bytes)", err, len(frame.Payload))
-		if h.verbose == "debug" && len(frame.Payload) > 0 {
+		if h.debug && len(frame.Payload) > 0 {
 			log.Printf("[debug] response payload hex: %s", protocol.HexPreview(frame.Payload, 256))
 		}
 		return
@@ -293,7 +293,7 @@ func (h *ClientHandler) ForwardWebSocket(tunnelID uint64, req protocol.HTTPReque
 func (h *ClientHandler) forward(tunnelID uint64, req protocol.HTTPRequest, streamData chan []byte) (requestID uint64, resp protocol.HTTPResponse, cleanup func(), err error) {
 	requestID = h.nextRequestID()
 
-	if h.verbose == "debug" {
+	if h.debug {
 		log.Printf("[debug] forward request #%d: %s %s (%d headers, %d body bytes)",
 			requestID, req.Method, req.Path, len(req.Headers), len(req.Body))
 	}
@@ -315,7 +315,7 @@ func (h *ClientHandler) forward(tunnelID uint64, req protocol.HTTPRequest, strea
 		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: encode error: %w", err)
 	}
 
-	if h.verbose == "debug" {
+	if h.debug {
 		log.Printf("[debug] forward payload #%d: %d bytes", requestID, len(payload))
 	}
 
@@ -333,7 +333,7 @@ func (h *ClientHandler) forward(tunnelID uint64, req protocol.HTTPRequest, strea
 		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: timeout after %v", protocol.RequestTimeout)
 	}
 
-	if h.verbose == "debug" {
+	if h.debug {
 		log.Printf("[debug] forward response #%d: status %d (%d headers, %d body bytes)",
 			requestID, resp.StatusCode, len(resp.Headers), len(resp.Body))
 	}
@@ -378,8 +378,8 @@ func (h *ClientHandler) writeMessage(msgType byte, tunnelID, requestID uint64, p
 	return h.conn.WriteMessage(websocket.BinaryMessage, frame)
 }
 
-func (h *ClientHandler) writeError(requestID uint64, msg string) {
-	h.writeMessage(protocol.MsgError, 0, requestID, []byte(msg))
+func (h *ClientHandler) registerErr(msg string) {
+	h.writeMessage(protocol.MsgRegisterErr, 0, 0, []byte(msg))
 }
 
 func (h *ClientHandler) cleanup() {
@@ -408,7 +408,7 @@ func validSubdomain(s string) bool {
 	if s == "" {
 		return true
 	}
-	if len(s) > 63 {
+	if len(s) > protocol.MaxSubdomainLen {
 		return false
 	}
 	for i := 0; i < len(s); i++ {

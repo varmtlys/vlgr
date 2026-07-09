@@ -16,11 +16,11 @@ import (
 type ReverseProxy struct {
 	registry   *Registry
 	baseDomain string
-	verbose    string
+	debug      bool
 }
 
-func NewReverseProxy(registry *Registry, baseDomain string, verbose string) *ReverseProxy {
-	return &ReverseProxy{registry: registry, baseDomain: baseDomain, verbose: verbose}
+func NewReverseProxy(registry *Registry, baseDomain string, debug bool) *ReverseProxy {
+	return &ReverseProxy{registry: registry, baseDomain: baseDomain, debug: debug}
 }
 
 func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +46,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[proxy] received %s %s (body: %d bytes)", r.Method, r.URL.EscapedPath(), len(body))
 
-	if p.verbose == "debug" {
+	if p.debug {
 		protocol.DebugLogHeaders("[debug] request", r.Header)
 		if len(body) > 0 {
 			log.Printf("[debug] request body: %s", protocol.TextPreview(body, 200))
@@ -93,8 +93,14 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if p.verbose == "debug" {
-		log.Printf("[debug] WebSocket upgrade detected for %s", requestPath)
+	p.serveWebSocket(w, tunnel, req, subdomain)
+}
+
+// serveWebSocket forwards an Upgrade request through the tunnel and, on 101,
+// hijacks the connection and relays raw bytes in both directions.
+func (p *ReverseProxy) serveWebSocket(w http.ResponseWriter, tunnel *Tunnel, req protocol.HTTPRequest, subdomain string) {
+	if p.debug {
+		log.Printf("[debug] WebSocket upgrade detected for %s", req.Path)
 	}
 	streamData := make(chan []byte, protocol.StreamRelayBuf)
 
@@ -137,8 +143,8 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if p.verbose == "debug" {
-		log.Printf("[debug] WebSocket relay started for %s (request #%d)", requestPath, requestID)
+	if p.debug {
+		log.Printf("[debug] WebSocket relay started for %s (request #%d)", req.Path, requestID)
 	}
 
 	var wg sync.WaitGroup
@@ -176,8 +182,8 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 	conn.Close()
 
-	if p.verbose == "debug" {
-		log.Printf("[debug] WebSocket relay ended for %s", requestPath)
+	if p.debug {
+		log.Printf("[debug] WebSocket relay ended for %s", req.Path)
 	}
 }
 

@@ -84,9 +84,10 @@ func main() {
 		*token = os.Getenv("VLGR_TOKEN")
 	}
 
+	debug := *verbose == "debug"
 	baseDomain := *domain
 	registry := server.NewRegistry()
-	proxy := server.NewReverseProxy(registry, baseDomain, *verbose)
+	proxy := server.NewReverseProxy(registry, baseDomain, debug)
 
 	tunnelMux := http.NewServeMux()
 	tunnelMux.HandleFunc("/_tunnel", func(w http.ResponseWriter, r *http.Request) {
@@ -104,7 +105,7 @@ func main() {
 			return
 		}
 
-		handler := server.NewClientHandler(conn, registry, baseDomain, *token, *verbose)
+		handler := server.NewClientHandler(conn, registry, baseDomain, *token, debug)
 		log.Printf("[server] new client connected")
 		handler.Run()
 	})

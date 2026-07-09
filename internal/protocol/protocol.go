@@ -174,6 +174,26 @@ func readHeaders(reader *bytes.Reader) (map[string][]string, error) {
 	return headers, nil
 }
 
+func writeBody(buf *bytes.Buffer, body []byte) {
+	binary.Write(buf, binary.BigEndian, uint32(len(body)))
+	buf.Write(body)
+}
+
+func readBody(reader *bytes.Reader) ([]byte, error) {
+	var bodyLen uint32
+	if err := binary.Read(reader, binary.BigEndian, &bodyLen); err != nil {
+		return nil, fmt.Errorf("read body length: %w", err)
+	}
+	if bodyLen > MaxBodySize {
+		return nil, fmt.Errorf("body too large: %d > %d", bodyLen, MaxBodySize)
+	}
+	body := make([]byte, bodyLen)
+	if _, err := io.ReadFull(reader, body); err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+	return body, nil
+}
+
 func EncodeHTTPRequest(req HTTPRequest) ([]byte, error) {
 	var buf bytes.Buffer
 	if err := writeString(&buf, req.Method); err != nil {
@@ -185,8 +205,7 @@ func EncodeHTTPRequest(req HTTPRequest) ([]byte, error) {
 	if err := writeHeaders(&buf, req.Headers); err != nil {
 		return nil, err
 	}
-	binary.Write(&buf, binary.BigEndian, uint32(len(req.Body)))
-	buf.Write(req.Body)
+	writeBody(&buf, req.Body)
 	return buf.Bytes(), nil
 }
 
@@ -212,18 +231,9 @@ func DecodeHTTPRequest(data []byte) (HTTPRequest, error) {
 	}
 	req.Headers = headers
 
-	var bodyLen uint32
-	if err := binary.Read(reader, binary.BigEndian, &bodyLen); err != nil {
-		return req, fmt.Errorf("read body length: %w", err)
+	if req.Body, err = readBody(reader); err != nil {
+		return req, err
 	}
-	if bodyLen > MaxBodySize {
-		return req, fmt.Errorf("body too large: %d > %d", bodyLen, MaxBodySize)
-	}
-	req.Body = make([]byte, bodyLen)
-	if _, err := io.ReadFull(reader, req.Body); err != nil {
-		return req, fmt.Errorf("read body: %w", err)
-	}
-
 	return req, nil
 }
 
@@ -233,8 +243,7 @@ func EncodeHTTPResponse(resp HTTPResponse) ([]byte, error) {
 	if err := writeHeaders(&buf, resp.Headers); err != nil {
 		return nil, err
 	}
-	binary.Write(&buf, binary.BigEndian, uint32(len(resp.Body)))
-	buf.Write(resp.Body)
+	writeBody(&buf, resp.Body)
 	return buf.Bytes(), nil
 }
 
@@ -252,18 +261,9 @@ func DecodeHTTPResponse(data []byte) (HTTPResponse, error) {
 	}
 	resp.Headers = headers
 
-	var bodyLen uint32
-	if err := binary.Read(reader, binary.BigEndian, &bodyLen); err != nil {
-		return resp, fmt.Errorf("read body length: %w", err)
+	if resp.Body, err = readBody(reader); err != nil {
+		return resp, err
 	}
-	if bodyLen > MaxBodySize {
-		return resp, fmt.Errorf("body too large: %d > %d", bodyLen, MaxBodySize)
-	}
-	resp.Body = make([]byte, bodyLen)
-	if _, err := io.ReadFull(reader, resp.Body); err != nil {
-		return resp, fmt.Errorf("read body: %w", err)
-	}
-
 	return resp, nil
 }
 
