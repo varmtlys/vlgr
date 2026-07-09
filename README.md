@@ -43,6 +43,8 @@ The client opens a persistent WebSocket to the server. The server assigns a uniq
 
 WebSocket upgrades are fully proxied via TCP hijacking and `MsgStreamData`/`MsgStreamClose` frames, enabling bidirectional real-time communication.
 
+Large HTTP bodies are streamed too: bodies up to 4 MB travel inline in a single frame, anything bigger is relayed in 32 KB `MsgStreamData` chunks — so uploads/downloads have no size limit, responses are flushed as they arrive (SSE works), and memory per transfer stays bounded.
+
 ---
 
 ## Project Structure
@@ -62,20 +64,23 @@ vlgr/
 │
 ├── internal/
 │   ├── protocol/
-│   │   ├── protocol.go             # Binary protocol: framing, HTTP serialization
-│   │   └── protocol_test.go        # 22 unit tests: frames, HTTP serde, WS detection
+│   │   ├── protocol.go             # Binary protocol: framing, HTTP serialization, streamed bodies
+│   │   └── protocol_test.go        # 49 unit tests: frames, HTTP serde, register/auth codecs, WS detection
+│   ├── version/
+│   │   ├── version.go              # Version string for the handshake mismatch warning
+│   │   └── version_test.go
 │   ├── server/
 │   │   ├── registry.go             # Tunnel registry (subdomain → Tunnel)
-│   │   ├── registry_test.go        # 8 tests: register, get, unregister, concurrency
+│   │   ├── registry_test.go        # 9 tests: register, get, unregister, concurrency
 │   │   ├── handler.go              # Client WebSocket handler
-│   │   ├── handler_test.go         # 39 tests: auth, registration, frame dispatch, stream relay, concurrency
-│   │   ├── proxy.go                # Reverse proxy for incoming HTTP
-│   │   └── proxy_test.go           # 2 tests: subdomain extraction (17 cases)
+│   │   ├── handler_test.go         # 41 tests: auth, registration, frame dispatch, stream relay, concurrency
+│   │   ├── proxy.go                # Reverse proxy for incoming HTTP, streamed transfers
+│   │   └── proxy_test.go           # 5 tests: subdomain extraction, response writing, header injection
 │   ├── client/
-│   │   ├── tunnel.go               # Client logic: connect, register, proxy
-│   │   └── tunnel_test.go          # 23 tests: routing, WS relay, error paths, concurrency
+│   │   ├── tunnel.go               # Client logic: connect, register, proxy, streamed bodies
+│   │   └── tunnel_test.go          # 27 tests: routing, WS relay, body streams, error paths
 │   └── integration/
-│       └── integration_test.go     # 22 E2E tests: live server/client/backend
+│       └── integration_test.go     # 24 E2E tests: live server/client/backend, streamed bodies
 │
 ├── scripts/
 │   ├── build.ps1                   # Cross-compile for all platforms (PowerShell)
@@ -126,8 +131,25 @@ Every message is wrapped in a fixed binary frame:
 | `0x08` | `MsgHTTPRes` | Client → Server | HTTP response from local server |
 | `0x09` | `MsgCloseTunnel` | Both | Close tunnel request |
 | `0x0A` | `MsgError` | Both | Error message |
-| `0x0B` | `MsgStreamData` | Both | WebSocket stream data chunk |
-| `0x0C` | `MsgStreamClose` | Both | WebSocket stream close |
+| `0x0B` | `MsgStreamData` | Both | Stream data chunk (WebSocket relay or streamed HTTP body) |
+| `0x0C` | `MsgStreamClose` | Both | Stream close / body EOF |
+
+### Auth payload (`MsgAuth` / `MsgAuthOK`)
+
+```
+MsgAuth:   [tokenLen:2][token][versionLen:2][version]
+MsgAuthOK: [versionLen:2][serverVersion]
+```
+
+The version field enables a mismatch warning during the handshake. A missing
+version field is tolerated for older clients.
+
+### Register payload (`MsgRegister` / `MsgRegisterOK`)
+
+```
+MsgRegister:   [port:2][subdomainLen:1][subdomain]     (subdomain optional)
+MsgRegisterOK: [urlLen:1][publicURL][tunnelID:8]
+```
 
 ### HTTP request payload (`MsgHTTPReq`)
 
@@ -140,6 +162,14 @@ Every message is wrapped in a fixed binary frame:
 ```
 [statusCode:2][headerCount:4]([keyLen:2][key][valueLen:2][value])*[bodyLen:4][body]
 ```
+
+### Streamed bodies
+
+Bodies ≤ 4 MB (`InlineBodyLimit`) are inlined in `bodyLen`/`body` as shown
+above. Larger bodies set `bodyLen = 0xFFFFFFFF` (`StreamedBodyLen`) with no
+inline body; the body then follows as `MsgStreamData` frames with the same
+`RequestID`, terminated by `MsgStreamClose`. Request bodies stream
+server → client, response bodies client → server; both may stream at once.
 
 ### Keep-alive
 
@@ -157,9 +187,7 @@ Thread-safe map `subdomain → *Tunnel`. The central routing table: when an exte
 type Tunnel struct {
     ID        uint64
     Subdomain string
-    LocalPort uint16
     Handler   *ClientHandler
-    CreatedAt time.Time
 }
 
 type Registry struct {
@@ -181,9 +209,9 @@ Handles one client WebSocket connection. Each connected client gets its own inst
    - Sets read deadlines, registers Pong handler.
    - Starts `pingLoop` goroutine (sends WebSocket Ping every 30s).
    - Reads binary messages, decodes frames, dispatches by type.
-3. `handleAuth` — validates token via constant-time comparison (`crypto/subtle`), rejects invalid tokens with `MsgAuthErr`.
-4. `handleRegister` — reads port from payload, registers tunnel, replies with public URL.
-5. `handleHTTPRes` — receives response from client, routes to awaiting `ForwardHTTP` via channel.
+3. `handleAuth` — validates token via constant-time comparison (`crypto/subtle`). An invalid token costs a flat 1 s delay, gets `MsgAuthErr`, and the connection is closed. Connections that don't authenticate within 10 s are dropped.
+4. `handleRegister` — decodes port/subdomain (`protocol.DecodeRegister`), registers tunnel, replies with public URL.
+5. `handleHTTPRes` — receives response from client, routes to awaiting forward call via channel.
 
 **Request multiplexing:**
 
@@ -198,7 +226,7 @@ type pendingReq struct {
 // pending map[uint64]*pendingReq  — RequestID → awaiting request
 ```
 
-`ForwardHTTP` generates a unique `requestID`, inserts a `pendingReq` into the map, writes `MsgHTTPReq` to WebSocket, then blocks on the response channel (30s timeout). When `MsgHTTPRes` arrives, `handleHTTPRes` finds the entry and delivers the response. For WebSocket upgrades, `streamData` provides a channel for bidirectional data relay.
+`startForward` generates a unique `requestID`, inserts a `pendingReq` into the map and writes `MsgHTTPReq`; `awaitResponse` blocks on the response channel (30 s timeout, 5 min for streamed uploads). When `MsgHTTPRes` arrives, `handleHTTPRes` finds the entry and delivers the response. The `streamData` channel carries WebSocket relay data or a streamed response body.
 
 ### 3. ReverseProxy (`internal/server/proxy.go`)
 
@@ -208,10 +236,10 @@ HTTP handler for external traffic. Implements `http.Handler`.
 
 1. Extract subdomain from `Host` header using `extractSubdomain(host, baseDomain)`.
 2. Look up tunnel in registry → 404 if missing.
-3. Read request body (32MB limit).
-4. Serialize into `protocol.HTTPRequest`.
-5. Call `tunnel.Handler.ForwardHTTP(req)` — blocks until response.
-6. Write HTTP response back to external user.
+3. Read request body up to 4 MB; a larger body is pumped concurrently as `MsgStreamData` chunks (no size limit).
+4. Serialize into `protocol.HTTPRequest`, adding `X-Forwarded-Host/Proto/For`.
+5. Forward through the tunnel — blocks until the response header arrives.
+6. Write the response: inline body directly, streamed body chunk-by-chunk with a `Flush` after each chunk (SSE-friendly).
 
 **Subdomain extraction:**
 
@@ -230,21 +258,24 @@ host = "abc123.tunnel.domain.com", baseDomain = "tunnel.domain.com"
 
 **Connect():**
 1. Dial WebSocket (`ws://` or `wss://` depending on `-tls` flag).
-2. Send `MsgAuth` with token.
+2. Send `MsgAuth` with token and client version; warn if the server version differs.
 3. For each port in the comma-separated `--ports` list, send `MsgRegister` with port and optional subdomain (matched by position in `--subdomain`).
 4. Parse public URLs and tunnelIDs from responses. Store `tunnelID → port` mapping for routing.
 
 **Run():**
 - Reads messages in a loop.
-- `MsgHTTPReq` → spawns `handleHTTPReq` goroutine (concurrent handling), routes to correct `localhost:<port>` by `frame.TunnelID`.
+- `MsgHTTPReq` → spawns `handleHTTPReq` goroutine (concurrent handling), routes to correct `localhost:<port>` by `frame.TunnelID`. A streamed request body is fed to the local app through an `io.Reader` backed by incoming `MsgStreamData` chunks; a response body over 4 MB is pumped back the same way.
+- `MsgStreamData`/`MsgStreamClose` → dispatched to the WebSocket relay, a streamed request body, or a streamed-response cancel signal.
 - `MsgCloseTunnel` → exits loop.
+
+**Limits:** 100 concurrent local requests, 200 concurrent long-lived streams (WebSocket relays + streamed transfers), 20 tunnels per client, 1000 client connections per server.
 
 **Multi-tunnel routing:**
 When the client registers multiple ports, the server assigns a unique `TunnelID` to each. Incoming `MsgHTTPReq` frames carry the target `TunnelID`. The client looks up the corresponding local port via `mappings[TunnelID]` and forwards the request to the correct `localhost:<port>`.
 
 ### 2. Client entry point (`cmd/client/main.go`)
 
-Reconnection loop with exponential backoff: 1s → 2s → 4s → ... → 30s max. Resets on successful connection. Handles SIGINT for graceful shutdown.
+Reconnection loop with exponential backoff: 1s → 2s → 4s → ... → 30s max. Resets on successful connection. Handles SIGINT/SIGTERM for graceful shutdown (the server does too).
 
 ---
 
@@ -460,7 +491,11 @@ void sendFrame(uint8_t type, uint64_t tunID, uint64_t reqID,
 void webSocketEvent(WStype_t t, uint8_t* d, size_t l) {
   if (t == WStype_CONNECTED) {
     Serial.println("> auth");
-    sendFrame(0x01, 0, 0, (uint8_t*)authToken, strlen(authToken));
+    // MsgAuth payload: [tokenLen:2][token][versionLen:2][version]
+    uint16_t tl = strlen(authToken);
+    uint8_t ap[132];
+    w16(&ap[0], tl); memcpy(&ap[2], authToken, tl); w16(&ap[2+tl], 0);
+    sendFrame(0x01, 0, 0, ap, 4 + tl);
     return;
   }
   if (t != WStype_BIN || l < 21) return;

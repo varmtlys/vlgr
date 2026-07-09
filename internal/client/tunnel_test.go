@@ -2,6 +2,7 @@ package client
 
 import (
 	"encoding/binary"
+	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -403,3 +404,61 @@ func (c *testConn) RemoteAddr() net.Addr               { return &net.TCPAddr{} }
 func (c *testConn) SetDeadline(t time.Time) error      { return nil }
 func (c *testConn) SetReadDeadline(t time.Time) error  { return nil }
 func (c *testConn) SetWriteDeadline(t time.Time) error { return nil }
+
+func TestContentLength(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string][]string
+		want    int64
+	}{
+		{"present", map[string][]string{"Content-Length": {"12345"}}, 12345},
+		{"case insensitive", map[string][]string{"content-length": {"7"}}, 7},
+		{"absent", map[string][]string{}, -1},
+		{"garbage", map[string][]string{"Content-Length": {"abc"}}, -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := contentLength(tt.headers); got != tt.want {
+				t.Errorf("want %d, got %d", tt.want, got)
+			}
+		})
+	}
+}
+
+func TestBodyStreamReader_ReadAndEOF(t *testing.T) {
+	bs := &bodyStream{ch: make(chan []byte, 4)}
+	bs.ch <- []byte("hello ")
+	bs.ch <- []byte("world")
+	close(bs.ch)
+
+	r := &bodyStreamReader{s: bs, done: make(chan struct{})}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(data) != "hello world" {
+		t.Errorf("want %q, got %q", "hello world", data)
+	}
+}
+
+func TestBodyStreamReader_Aborted(t *testing.T) {
+	bs := &bodyStream{ch: make(chan []byte, 1)}
+	bs.aborted.Store(true)
+	close(bs.ch)
+
+	r := &bodyStreamReader{s: bs, done: make(chan struct{})}
+	if _, err := io.ReadAll(r); err == nil {
+		t.Error("aborted stream must surface an error, not clean EOF")
+	}
+}
+
+func TestBodyStreamReader_TunnelClosed(t *testing.T) {
+	bs := &bodyStream{ch: make(chan []byte)}
+	done := make(chan struct{})
+	close(done)
+
+	r := &bodyStreamReader{s: bs, done: done}
+	if _, err := r.Read(make([]byte, 8)); err == nil {
+		t.Error("closed tunnel must unblock the reader with an error")
+	}
+}
