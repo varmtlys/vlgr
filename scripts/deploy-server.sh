@@ -201,19 +201,19 @@ install_packages() {
 
 # ─── Install Go ───────────────────────────────────────────────────────────────
 ensure_go() {
-  if has_cmd go && [[ "$(go version 2>/dev/null)" =~ go1\.2[2-9] ]]; then
+  if has_cmd go && [[ "$(go version 2>/dev/null)" =~ go1\.2[6-9] ]]; then
     log "Go $(go version | grep -oP 'go\S+') already installed"
     return
   fi
 
-  log "Installing Go 1.22+..."
+  log "Installing Go 1.26+..."
 
   if is_alpine || is_arch || is_suse || is_void; then
     install_packages go
   else
-    local go_ver="1.22.5"
+    local go_ver="1.26.3"
     local go_tar="go${go_ver}.linux-amd64.tar.gz"
-    local go_sha="9a6baf11ae4b72b70dfa8a863235ac3d6f4aa3c1d82b0f3cd87a07957b9715c6"
+    local go_sha="2b2cfc7148493da5e73981bffbf3353af381d5f93e789c82c79aff64962eb556"
     install_packages wget
     wget -q "https://go.dev/dl/${go_tar}" -O "/tmp/${go_tar}"
     echo "${go_sha}  /tmp/${go_tar}" | sha256sum -c --status || { err "Go SHA256 mismatch"; exit 1; }

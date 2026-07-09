@@ -252,7 +252,7 @@ Reconnection loop with exponential backoff: 1s → 2s → 4s → ... → 30s max
 
 ### Requirements
 
-- Go 1.22+
+- Go 1.26+
 - VPS with public IP (for server) — or localhost for testing
 
 ### Setup

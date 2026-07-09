@@ -8,7 +8,7 @@
 #
 # Available targets: windows/amd64, windows/x86, linux/amd64, linux/x86, linux/arm64, darwin/amd64, darwin/arm64
 #
-# Requires: Go 1.22+ installed and in PATH.
+# Requires: Go 1.26+ installed and in PATH.
 
 param(
     [string]$Targets = ""

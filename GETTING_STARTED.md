@@ -69,7 +69,7 @@ sudo ./scripts/deploy-server.sh -d tunnel.domain.com -t mysecret --release lates
 1. Detects your Linux distro (Debian, Ubuntu, RHEL, Arch, Alpine, openSUSE, Void)
 2. Installs dependencies (curl, wget, git)
 3. Downloads the latest pre-built `vlgr-server` binary from GitHub Releases
-4. Falls back to installing Go 1.22+ and building from source if no release binary found
+4. Falls back to installing Go 1.26+ and building from source if no release binary found
 5. Creates a dedicated system user (default: `nobody`)
 6. Sets up directories (`/opt/vlgr/bin`, `/opt/vlgr/logs`, `/etc/vlgr`)
 7. Writes config to `/etc/vlgr/vlgr-server.conf`
