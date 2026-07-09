@@ -24,7 +24,7 @@
 #   --release <v>   Download pre-built binary from GitHub release (e.g. "latest" or "v1.0")
 #   --ref <ref>     Git ref to checkout when building from source (default: main)
 #   --src-sha256 <h> Verify the cloned source tree matches this sha256 (optional, strong)
-#   --help          Show this help
+#   -h, --help      Show this help (also shown when run without any arguments)
 #
 # By default the script tries to download the latest GitHub release binary.
 # If no release exists or download fails, it builds from source.
@@ -48,7 +48,16 @@ SRC_SHA256=""
 REPO_URL="https://github.com/varmtlys/vlgr.git"
 RELEASES_URL="https://github.com/varmtlys/vlgr/releases"
 
+show_help() {
+  sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+}
+
 # ─── Parse args ──────────────────────────────────────────────────────────────
+if [[ $# -eq 0 ]]; then
+  show_help
+  exit 0
+fi
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -d) DOMAIN="$2"; shift 2 ;;
@@ -64,7 +73,7 @@ while [[ $# -gt 0 ]]; do
     --release) VLGR_RELEASE="$2"; shift 2 ;;
     --ref) GIT_REF="$2"; shift 2 ;;
     --src-sha256) SRC_SHA256="$2"; shift 2 ;;
-    --help) sed -n '/^# Usage:/,/^$/p' "$0"; exit 0 ;;
+    -h|--help) show_help; exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done

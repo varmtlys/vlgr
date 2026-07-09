@@ -306,7 +306,9 @@ User=nobody
 Group=nogroup
 WorkingDirectory=/opt/vlgr
 EnvironmentFile=/etc/vlgr/vlgr-server.conf
-ExecStart=/opt/vlgr/vlgr-server -addr ${VLGR_WS_ADDR} -http ${VLGR_HTTP_ADDR} -domain ${VLGR_DOMAIN} -token ${VLGR_TOKEN}
+# Token is NOT passed as a flag (visible in /proc/PID/cmdline) —
+# the server reads VLGR_TOKEN from the environment (EnvironmentFile above).
+ExecStart=/opt/vlgr/vlgr-server -addr ${VLGR_WS_ADDR} -http ${VLGR_HTTP_ADDR} -domain ${VLGR_DOMAIN}
 Restart=always
 RestartSec=5
 TimeoutStopSec=10
