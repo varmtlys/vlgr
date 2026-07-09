@@ -670,3 +670,43 @@ func TestEncodeHTTPRequest_StringTooLong(t *testing.T) {
 		t.Error("expected error for oversized path string")
 	}
 }
+
+func TestEncodeDecodeHTTPRequest_StreamedBody(t *testing.T) {
+	encoded, err := EncodeHTTPRequest(HTTPRequest{
+		Method:       "POST",
+		Path:         "/upload",
+		Headers:      map[string][]string{"Content-Length": {"999999999"}},
+		BodyStreamed: true,
+	})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	decoded, err := DecodeHTTPRequest(encoded)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !decoded.BodyStreamed {
+		t.Error("BodyStreamed flag lost in roundtrip")
+	}
+	if len(decoded.Body) != 0 {
+		t.Errorf("streamed request must have empty inline body, got %d bytes", len(decoded.Body))
+	}
+}
+
+func TestEncodeDecodeHTTPResponse_StreamedBody(t *testing.T) {
+	encoded, err := EncodeHTTPResponse(HTTPResponse{
+		StatusCode:   200,
+		Headers:      map[string][]string{"Content-Type": {"video/mp4"}},
+		BodyStreamed: true,
+	})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	decoded, err := DecodeHTTPResponse(encoded)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !decoded.BodyStreamed {
+		t.Error("BodyStreamed flag lost in roundtrip")
+	}
+}

@@ -332,12 +332,15 @@ func (h *ClientHandler) ForwardWebSocket(tunnelID uint64, req protocol.HTTPReque
 	return h.forward(tunnelID, req, streamData)
 }
 
-func (h *ClientHandler) forward(tunnelID uint64, req protocol.HTTPRequest, streamData chan []byte) (requestID uint64, resp protocol.HTTPResponse, cleanup func(), err error) {
-	requestID = h.nextRequestID()
+// startForward registers a pending request and sends the MsgHTTPReq frame.
+// The caller must eventually call finishForward (directly or via the cleanup
+// func returned by forward).
+func (h *ClientHandler) startForward(tunnelID uint64, req protocol.HTTPRequest, streamData chan []byte) (uint64, *pendingReq, error) {
+	requestID := h.nextRequestID()
 
 	if h.debug {
-		log.Printf("[debug] forward request #%d: %s %s (%d headers, %d body bytes)",
-			requestID, req.Method, req.Path, len(req.Headers), len(req.Body))
+		log.Printf("[debug] forward request #%d: %s %s (%d headers, %d body bytes, streamed=%v)",
+			requestID, req.Method, req.Path, len(req.Headers), len(req.Body), req.BodyStreamed)
 	}
 
 	pr := &pendingReq{
@@ -355,43 +358,57 @@ func (h *ClientHandler) forward(tunnelID uint64, req protocol.HTTPRequest, strea
 		err = fmt.Errorf("encoded request exceeds max frame size: %d > %d", len(payload), protocol.MaxFrameSize)
 	}
 	if err != nil {
-		h.removePending(requestID)
-		pr.closeDone()
-		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: encode error: %w", err)
-	}
-
-	if h.debug {
-		log.Printf("[debug] forward payload #%d: %d bytes", requestID, len(payload))
+		h.finishForward(requestID, pr)
+		return 0, nil, fmt.Errorf("forward: encode error: %w", err)
 	}
 
 	if err := h.writeMessage(protocol.MsgHTTPReq, tunnelID, requestID, payload); err != nil {
-		h.removePending(requestID)
-		pr.closeDone()
-		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: write error: %w", err)
+		h.finishForward(requestID, pr)
+		return 0, nil, fmt.Errorf("forward: write error: %w", err)
 	}
 
+	return requestID, pr, nil
+}
+
+// awaitResponse waits for the MsgHTTPRes frame; on timeout it tears the
+// pending request down.
+func (h *ClientHandler) awaitResponse(requestID uint64, pr *pendingReq, timeout time.Duration) (protocol.HTTPResponse, error) {
 	select {
-	case resp = <-pr.response:
-	case <-time.After(protocol.RequestTimeout):
-		h.removePending(requestID)
-		pr.closeDone()
-		return 0, protocol.HTTPResponse{}, nil, fmt.Errorf("forward: timeout after %v", protocol.RequestTimeout)
+	case resp := <-pr.response:
+		if h.debug {
+			log.Printf("[debug] forward response #%d: status %d (%d headers, %d body bytes, streamed=%v)",
+				requestID, resp.StatusCode, len(resp.Headers), len(resp.Body), resp.BodyStreamed)
+		}
+		return resp, nil
+	case <-time.After(timeout):
+		h.finishForward(requestID, pr)
+		return protocol.HTTPResponse{}, fmt.Errorf("forward: timeout after %v", timeout)
+	}
+}
+
+func (h *ClientHandler) finishForward(requestID uint64, pr *pendingReq) {
+	h.removePending(requestID)
+	pr.closeDone()
+}
+
+func (h *ClientHandler) forward(tunnelID uint64, req protocol.HTTPRequest, streamData chan []byte) (requestID uint64, resp protocol.HTTPResponse, cleanup func(), err error) {
+	requestID, pr, err := h.startForward(tunnelID, req, streamData)
+	if err != nil {
+		return 0, protocol.HTTPResponse{}, nil, err
 	}
 
-	if h.debug {
-		log.Printf("[debug] forward response #%d: status %d (%d headers, %d body bytes)",
-			requestID, resp.StatusCode, len(resp.Headers), len(resp.Body))
+	resp, err = h.awaitResponse(requestID, pr, protocol.RequestTimeout)
+	if err != nil {
+		return 0, protocol.HTTPResponse{}, nil, err
 	}
 
 	if streamData == nil {
-		h.removePending(requestID)
-		pr.closeDone()
+		h.finishForward(requestID, pr)
 	}
 
 	return requestID, resp, func() {
 		if streamData != nil {
-			h.removePending(requestID)
-			pr.closeDone()
+			h.finishForward(requestID, pr)
 		}
 	}, nil
 }

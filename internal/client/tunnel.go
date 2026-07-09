@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -19,10 +20,14 @@ import (
 	"vlgr/internal/version"
 )
 
+// No global Timeout: it would abort streamed transfers mid-flight. The
+// response header must still arrive within RequestTimeout.
 var httpClient = &http.Client{
-	Timeout: 30 * time.Second,
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
+	},
+	Transport: &http.Transport{
+		ResponseHeaderTimeout: protocol.RequestTimeout,
 	},
 }
 
@@ -35,6 +40,39 @@ type streamRelay struct {
 	conn     net.Conn
 	done     chan struct{}
 	doneOnce sync.Once
+}
+
+// bodyStream buffers incoming request-body chunks for a streamed upload.
+type bodyStream struct {
+	ch      chan []byte
+	aborted atomic.Bool
+}
+
+// bodyStreamReader adapts a bodyStream to io.Reader for http.Request.Body.
+type bodyStreamReader struct {
+	s    *bodyStream
+	done <-chan struct{}
+	rem  []byte
+}
+
+func (r *bodyStreamReader) Read(p []byte) (int, error) {
+	for len(r.rem) == 0 {
+		select {
+		case data, ok := <-r.s.ch:
+			if !ok {
+				if r.s.aborted.Load() {
+					return 0, fmt.Errorf("body stream aborted")
+				}
+				return 0, io.EOF
+			}
+			r.rem = data
+		case <-r.done:
+			return 0, fmt.Errorf("tunnel closed")
+		}
+	}
+	n := copy(p, r.rem)
+	r.rem = r.rem[n:]
+	return n, nil
 }
 
 func (r *streamRelay) closeDone() {
@@ -67,6 +105,12 @@ type Tunnel struct {
 	relays   map[uint64]*streamRelay
 	relaysMu sync.Mutex
 
+	// Streamed HTTP bodies: incoming request bodies and cancel signals
+	// for outgoing streamed responses, keyed by requestID.
+	bodyStreams map[uint64]*bodyStream
+	respCancels map[uint64]chan struct{}
+	streamsMu   sync.Mutex
+
 	localReqSem chan struct{}
 	relaySem    chan struct{}
 
@@ -90,6 +134,8 @@ func NewTunnel(serverAddr, token string, ports []uint16, subdomains []string, us
 		relays:      make(map[uint64]*streamRelay),
 		localReqSem: make(chan struct{}, maxConcurrentLocalReqs),
 		relaySem:    make(chan struct{}, maxConcurrentRelays),
+		bodyStreams: make(map[uint64]*bodyStream),
+		respCancels: make(map[uint64]chan struct{}),
 	}
 }
 
@@ -303,21 +349,42 @@ func (t *Tunnel) handleStreamData(frame protocol.Frame) {
 	relay, ok := t.relays[frame.RequestID]
 	t.relaysMu.Unlock()
 
+	if ok {
+		select {
+		case <-relay.done:
+			return
+		default:
+		}
+
+		relay.conn.SetWriteDeadline(time.Now().Add(protocol.WriteWait))
+		if _, err := relay.conn.Write(frame.Payload); err != nil {
+			log.Printf("[client] stream write error for request %d: %v", frame.RequestID, err)
+			relay.closeDone()
+			relay.conn.Close()
+		}
+		return
+	}
+
+	// Streamed request body chunk. Safe to hold frame.Payload: each
+	// ReadMessage returns a fresh buffer.
+	t.streamsMu.Lock()
+	bs, ok := t.bodyStreams[frame.RequestID]
+	t.streamsMu.Unlock()
 	if !ok {
 		return
 	}
 
 	select {
-	case <-relay.done:
-		return
-	default:
-	}
-
-	relay.conn.SetWriteDeadline(time.Now().Add(protocol.WriteWait))
-	if _, err := relay.conn.Write(frame.Payload); err != nil {
-		log.Printf("[client] stream write error for request %d: %v", frame.RequestID, err)
-		relay.closeDone()
-		relay.conn.Close()
+	case bs.ch <- frame.Payload:
+	case <-time.After(protocol.StreamSendTimeout):
+		// Local app is not consuming the upload; abort rather than
+		// silently dropping a chunk.
+		log.Printf("[client] body stream stalled for request %d, aborting", frame.RequestID)
+		t.streamsMu.Lock()
+		delete(t.bodyStreams, frame.RequestID)
+		t.streamsMu.Unlock()
+		bs.aborted.Store(true)
+		close(bs.ch)
 	}
 }
 
@@ -332,6 +399,30 @@ func (t *Tunnel) handleStreamClose(frame protocol.Frame) {
 	if ok {
 		relay.closeDone()
 		relay.conn.Close()
+		return
+	}
+
+	// Request body EOF for a streamed upload.
+	t.streamsMu.Lock()
+	bs, ok := t.bodyStreams[frame.RequestID]
+	if ok {
+		delete(t.bodyStreams, frame.RequestID)
+	}
+	t.streamsMu.Unlock()
+	if ok {
+		close(bs.ch)
+		return
+	}
+
+	// Server aborted a streamed response (viewer disconnected).
+	t.streamsMu.Lock()
+	cancel, ok := t.respCancels[frame.RequestID]
+	if ok {
+		delete(t.respCancels, frame.RequestID)
+	}
+	t.streamsMu.Unlock()
+	if ok {
+		close(cancel)
 	}
 }
 
@@ -526,11 +617,28 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 		log.Printf("[debug] forwarding to %s", targetURL)
 	}
 
-	httpReq, err := http.NewRequest(req.Method, targetURL, bytes.NewReader(req.Body))
+	var bodyReader io.Reader = bytes.NewReader(req.Body)
+	if req.BodyStreamed {
+		bs := &bodyStream{ch: make(chan []byte, protocol.StreamRelayBuf)}
+		t.streamsMu.Lock()
+		t.bodyStreams[requestID] = bs
+		t.streamsMu.Unlock()
+		defer func() {
+			t.streamsMu.Lock()
+			delete(t.bodyStreams, requestID)
+			t.streamsMu.Unlock()
+		}()
+		bodyReader = &bodyStreamReader{s: bs, done: t.done}
+	}
+
+	httpReq, err := http.NewRequest(req.Method, targetURL, bodyReader)
 	if err != nil {
 		log.Printf("[client] create local request error: %v", err)
 		t.sendHTTPError(tunnelID, requestID, 502, err.Error())
 		return
+	}
+	if req.BodyStreamed {
+		httpReq.ContentLength = contentLength(req.Headers)
 	}
 
 	copyHeaders(httpReq, req.Headers)
@@ -543,20 +651,16 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 	}
 	defer httpResp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(httpResp.Body, protocol.MaxBodySize+1))
+	body, err := io.ReadAll(io.LimitReader(httpResp.Body, protocol.InlineBodyLimit+1))
 	if err != nil {
 		log.Printf("[client] read response body error: %v", err)
 		t.sendHTTPError(tunnelID, requestID, 502, err.Error())
 		return
 	}
-	if len(body) > protocol.MaxBodySize {
-		log.Printf("[client] response body exceeds %d bytes, rejecting", protocol.MaxBodySize)
-		t.sendHTTPError(tunnelID, requestID, 502, fmt.Sprintf("response body exceeds max %d bytes", protocol.MaxBodySize))
-		return
-	}
 
 	statusCode := uint16(httpResp.StatusCode)
-	log.Printf("[client] localhost:%d response: %d %s (%d body bytes)", localPort, statusCode, http.StatusText(int(statusCode)), len(body))
+	streamed := len(body) > protocol.InlineBodyLimit
+	log.Printf("[client] localhost:%d response: %d %s (%d body bytes, streamed: %v)", localPort, statusCode, http.StatusText(int(statusCode)), len(body), streamed)
 
 	if t.debug {
 		protocol.DebugLogHeaders("[debug] response", httpResp.Header)
@@ -565,11 +669,93 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 		}
 	}
 
+	if !streamed {
+		t.writeResponse(tunnelID, requestID, protocol.HTTPResponse{
+			StatusCode: statusCode,
+			Headers:    httpResp.Header,
+			Body:       body,
+		})
+		return
+	}
+
+	t.streamResponseBody(tunnelID, requestID, statusCode, httpResp.Header, body, httpResp.Body)
+}
+
+// contentLength extracts Content-Length from tunnel headers, -1 if absent.
+func contentLength(headers map[string][]string) int64 {
+	for k, values := range headers {
+		if strings.EqualFold(k, "Content-Length") && len(values) > 0 {
+			if n, err := strconv.ParseInt(values[0], 10, 64); err == nil {
+				return n
+			}
+		}
+	}
+	return -1
+}
+
+// streamResponseBody sends the response headers with the streamed-body marker,
+// then pumps the prefix and the rest of the body as stream frames.
+func (t *Tunnel) streamResponseBody(tunnelID, requestID uint64, statusCode uint16, headers map[string][]string, prefix []byte, rest io.Reader) {
+	// Long transfers are capped with the relays, not the request slots.
+	select {
+	case t.relaySem <- struct{}{}:
+		defer func() { <-t.relaySem }()
+	default:
+		t.sendHTTPError(tunnelID, requestID, 503, "too many concurrent streamed transfers")
+		return
+	}
+
+	cancel := make(chan struct{})
+	t.streamsMu.Lock()
+	t.respCancels[requestID] = cancel
+	t.streamsMu.Unlock()
+	defer func() {
+		t.streamsMu.Lock()
+		delete(t.respCancels, requestID)
+		t.streamsMu.Unlock()
+	}()
+
 	t.writeResponse(tunnelID, requestID, protocol.HTTPResponse{
-		StatusCode: statusCode,
-		Headers:    httpResp.Header,
-		Body:       body,
+		StatusCode:   statusCode,
+		Headers:      headers,
+		BodyStreamed: true,
 	})
+
+	defer t.writeFrame(protocol.Frame{
+		Type:      protocol.MsgStreamClose,
+		TunnelID:  tunnelID,
+		RequestID: requestID,
+	})
+
+	send := func(data []byte) bool {
+		select {
+		case <-cancel:
+			return false
+		case <-t.done:
+			return false
+		default:
+		}
+		return t.writeFrame(protocol.Frame{
+			Type:      protocol.MsgStreamData,
+			TunnelID:  tunnelID,
+			RequestID: requestID,
+			Payload:   data,
+		}) == nil
+	}
+
+	if !send(prefix) {
+		return
+	}
+	buf := make([]byte, protocol.StreamBufSize)
+	for {
+		n, err := rest.Read(buf)
+		if n > 0 && !send(buf[:n]) {
+			return
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTTPRequest, release func()) {
