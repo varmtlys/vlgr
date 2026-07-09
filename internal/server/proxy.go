@@ -67,7 +67,9 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		headers["X-Forwarded-Proto"] = []string{proto}
 	}
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		headers["X-Forwarded-For"] = append(headers["X-Forwarded-For"], host)
+		// Copy before append: the slice is shared with r.Header.
+		xff := append([]string(nil), headers["X-Forwarded-For"]...)
+		headers["X-Forwarded-For"] = append(xff, host)
 	}
 
 	requestPath := r.URL.EscapedPath()

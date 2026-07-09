@@ -72,6 +72,12 @@ func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain strin
 	return h
 }
 
+func (h *ClientHandler) isAuthenticated() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.authenticated
+}
+
 func (h *ClientHandler) nextRequestID() uint64 {
 	return atomic.AddUint64(&h.requestIDSeq, 1)
 }
@@ -85,12 +91,22 @@ func (h *ClientHandler) removePending(requestID uint64) {
 func (h *ClientHandler) Run() {
 	defer h.cleanup()
 
-	h.conn.SetReadLimit(protocol.MaxBodySize + protocol.HeaderSize)
+	h.conn.SetReadLimit(protocol.MaxFrameSize + protocol.HeaderSize)
 	h.conn.SetReadDeadline(time.Now().Add(protocol.PongWait))
 	h.conn.SetPongHandler(func(string) error {
 		h.conn.SetReadDeadline(time.Now().Add(protocol.PongWait))
 		return nil
 	})
+
+	// Idle unauthenticated connections would hold connSem slots forever
+	// (pings keep them alive) — drop them if auth doesn't arrive in time.
+	authTimer := time.AfterFunc(protocol.AuthTimeout, func() {
+		if !h.isAuthenticated() {
+			log.Printf("[handler] closing connection: no auth within %v", protocol.AuthTimeout)
+			h.cleanup()
+		}
+	})
+	defer authTimer.Stop()
 
 	go h.pingLoop()
 
@@ -118,7 +134,7 @@ func (h *ClientHandler) Run() {
 }
 
 func (h *ClientHandler) handleFrame(frame protocol.Frame) {
-	if !h.authenticated && frame.Type != protocol.MsgAuth {
+	if !h.isAuthenticated() && frame.Type != protocol.MsgAuth {
 		log.Printf("[handler] rejecting message type 0x%02x before auth", frame.Type)
 		h.writeMessage(protocol.MsgAuthErr, 0, 0, []byte("authenticate first"))
 		return
@@ -160,12 +176,16 @@ func (h *ClientHandler) handleAuth(frame protocol.Frame) {
 		gotHash := sha256.Sum256([]byte(token))
 		if subtle.ConstantTimeCompare(h.expectedHash[:], gotHash[:]) != 1 {
 			log.Printf("[handler] auth rejected: invalid token")
+			// Flat cost per attempt to slow down token brute force.
+			time.Sleep(time.Second)
 			h.writeMessage(protocol.MsgAuthErr, 0, 0, []byte("invalid token"))
 			h.cleanup()
 			return
 		}
 	}
+	h.mu.Lock()
 	h.authenticated = true
+	h.mu.Unlock()
 	h.clientVersion = clientVersion
 
 	if clientVersion != "" && clientVersion != version.Version {
@@ -331,6 +351,9 @@ func (h *ClientHandler) forward(tunnelID uint64, req protocol.HTTPRequest, strea
 	h.mu.Unlock()
 
 	payload, err := protocol.EncodeHTTPRequest(req)
+	if err == nil && len(payload) > protocol.MaxFrameSize {
+		err = fmt.Errorf("encoded request exceeds max frame size: %d > %d", len(payload), protocol.MaxFrameSize)
+	}
 	if err != nil {
 		h.removePending(requestID)
 		pr.closeDone()

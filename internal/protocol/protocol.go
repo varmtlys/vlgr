@@ -28,14 +28,19 @@ const (
 	MsgStreamData  byte = 0x0B
 	MsgStreamClose byte = 0x0C
 
-	HeaderSize    = 21
-	MaxBodySize   = 32 << 20
+	HeaderSize  = 21
+	MaxBodySize = 32 << 20
+	// MaxFrameSize = max body plus headroom for encoded method/path/headers,
+	// so a maximum-size body doesn't overflow the frame limit and kill the
+	// whole tunnel connection.
+	MaxFrameSize  = MaxBodySize + 2<<20
 	StreamBufSize = 32 * 1024
 
 	MaxHeaders         = 256
 	MaxValuesPerHeader = 64
 
 	WriteWait        = 10 * time.Second
+	AuthTimeout      = 10 * time.Second
 	PongWait         = 60 * time.Second
 	PingPeriod       = 30 * time.Second
 	RequestTimeout   = 30 * time.Second
@@ -81,8 +86,8 @@ func DecodeFrame(data []byte) (Frame, error) {
 		return Frame{}, fmt.Errorf("frame too short: %d bytes, need at least %d", len(data), HeaderSize)
 	}
 	payloadLen := binary.BigEndian.Uint32(data[17:21])
-	if payloadLen > MaxBodySize {
-		return Frame{}, fmt.Errorf("frame payload exceeds max: %d > %d", payloadLen, MaxBodySize)
+	if payloadLen > MaxFrameSize {
+		return Frame{}, fmt.Errorf("frame payload exceeds max: %d > %d", payloadLen, MaxFrameSize)
 	}
 	if len(data) < HeaderSize+int(payloadLen) {
 		return Frame{}, fmt.Errorf("truncated payload: expected %d, got %d", payloadLen, len(data)-HeaderSize)

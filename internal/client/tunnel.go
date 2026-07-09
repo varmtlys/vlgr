@@ -26,7 +26,10 @@ var httpClient = &http.Client{
 	},
 }
 
-const maxConcurrentLocalReqs = 100
+const (
+	maxConcurrentLocalReqs = 100
+	maxConcurrentRelays    = 200
+)
 
 type streamRelay struct {
 	conn     net.Conn
@@ -65,6 +68,7 @@ type Tunnel struct {
 	relaysMu sync.Mutex
 
 	localReqSem chan struct{}
+	relaySem    chan struct{}
 
 	controlLn   net.Listener
 	controlAddr string
@@ -85,6 +89,7 @@ func NewTunnel(serverAddr, token string, ports []uint16, subdomains []string, us
 		mappings:    make(map[uint64]uint16),
 		relays:      make(map[uint64]*streamRelay),
 		localReqSem: make(chan struct{}, maxConcurrentLocalReqs),
+		relaySem:    make(chan struct{}, maxConcurrentRelays),
 	}
 }
 
@@ -106,7 +111,7 @@ func (t *Tunnel) Connect() error {
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", url, err)
 	}
-	conn.SetReadLimit(protocol.MaxBodySize + protocol.HeaderSize)
+	conn.SetReadLimit(protocol.MaxFrameSize + protocol.HeaderSize)
 	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	t.conn = conn
 
@@ -165,6 +170,9 @@ func (t *Tunnel) Connect() error {
 			return fmt.Errorf("send register for port %d: %w", port, err)
 		}
 
+		// Per-response deadline: one absolute deadline for the whole loop
+		// would spuriously fail with many ports on a slow link.
+		conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 		_, msg, err = conn.ReadMessage()
 		if err != nil {
 			return fmt.Errorf("read register response for port %d: %w", port, err)
@@ -210,7 +218,15 @@ func (t *Tunnel) Run() {
 		conn.SetReadDeadline(time.Now().Add(protocol.PongWait))
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			log.Printf("[client] read error: %v", err)
+			select {
+			case <-t.done: // local Close() — expected, don't log as error
+			default:
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+					log.Printf("[client] read error: %v", err)
+				} else {
+					log.Printf("[client] connection closed")
+				}
+			}
 			return
 		}
 
@@ -557,6 +573,15 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 }
 
 func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTTPRequest, release func()) {
+	// Long-lived relays are capped separately from the HTTP request slots.
+	select {
+	case t.relaySem <- struct{}{}:
+		defer func() { <-t.relaySem }()
+	default:
+		t.sendHTTPError(tunnelID, requestID, 503, "too many concurrent websocket relays")
+		return
+	}
+
 	localPort, ok := t.lookupPort(tunnelID, requestID)
 	if !ok {
 		return
@@ -671,6 +696,9 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 
 func (t *Tunnel) writeResponse(tunnelID, requestID uint64, resp protocol.HTTPResponse) {
 	respPayload, err := protocol.EncodeHTTPResponse(resp)
+	if err == nil && len(respPayload) > protocol.MaxFrameSize {
+		err = fmt.Errorf("encoded response exceeds max frame size: %d > %d", len(respPayload), protocol.MaxFrameSize)
+	}
 	if err != nil {
 		log.Printf("[client] encode response error: %v", err)
 		respPayload, _ = protocol.EncodeHTTPResponse(protocol.HTTPResponse{

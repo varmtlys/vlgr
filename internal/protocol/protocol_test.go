@@ -63,10 +63,22 @@ func TestDecodeFrame_TooShort(t *testing.T) {
 func TestDecodeFrame_PayloadExceedsMax(t *testing.T) {
 	buf := make([]byte, HeaderSize)
 	buf[0] = MsgHTTPReq
-	binaryWrite(buf[17:21], MaxBodySize+1)
+	binaryWrite(buf[17:21], MaxFrameSize+1)
 	_, err := DecodeFrame(buf)
 	if err == nil {
 		t.Error("expected error for oversized payload")
+	}
+}
+
+func TestDecodeFrame_MaxBodyPlusHeadersFits(t *testing.T) {
+	// A max-size body plus encoded headers must fit within MaxFrameSize,
+	// otherwise one large request kills the whole tunnel connection.
+	payloadLen := MaxBodySize + 100*1024
+	buf := make([]byte, HeaderSize+payloadLen)
+	buf[0] = MsgHTTPReq
+	binaryWrite(buf[17:21], uint32(payloadLen))
+	if _, err := DecodeFrame(buf); err != nil {
+		t.Fatalf("frame with max body + headers should decode: %v", err)
 	}
 }
 
@@ -580,5 +592,81 @@ func binaryWriteTo(buf *bytes.Buffer, v interface{}) {
 		buf.WriteByte(byte(val >> 16))
 		buf.WriteByte(byte(val >> 8))
 		buf.WriteByte(byte(val))
+	}
+}
+
+func TestEncodeDecodeRegister_Roundtrip(t *testing.T) {
+	payload, err := EncodeRegister(8080, "myapp")
+	if err != nil {
+		t.Fatalf("EncodeRegister: %v", err)
+	}
+	port, sub, err := DecodeRegister(payload)
+	if err != nil {
+		t.Fatalf("DecodeRegister: %v", err)
+	}
+	if port != 8080 || sub != "myapp" {
+		t.Errorf("roundtrip: want (8080, myapp), got (%d, %q)", port, sub)
+	}
+}
+
+func TestEncodeDecodeRegister_NoSubdomain(t *testing.T) {
+	payload, err := EncodeRegister(3000, "")
+	if err != nil {
+		t.Fatalf("EncodeRegister: %v", err)
+	}
+	port, sub, err := DecodeRegister(payload)
+	if err != nil {
+		t.Fatalf("DecodeRegister: %v", err)
+	}
+	if port != 3000 || sub != "" {
+		t.Errorf("roundtrip: want (3000, \"\"), got (%d, %q)", port, sub)
+	}
+}
+
+func TestEncodeRegister_SubdomainTooLong(t *testing.T) {
+	if _, err := EncodeRegister(80, strings.Repeat("a", MaxSubdomainLen+1)); err == nil {
+		t.Error("expected error for oversized subdomain")
+	}
+}
+
+func TestDecodeRegister_Truncated(t *testing.T) {
+	if _, _, err := DecodeRegister([]byte{0x1F, 0x90, 10, 'a', 'b'}); err == nil {
+		t.Error("expected error for truncated subdomain")
+	}
+	if _, _, err := DecodeRegister([]byte{0x01}); err == nil {
+		t.Error("expected error for short payload")
+	}
+}
+
+func TestEncodeDecodeRegisterOK_Roundtrip(t *testing.T) {
+	payload, err := EncodeRegisterOK("app.tunnel.domain.com", 42)
+	if err != nil {
+		t.Fatalf("EncodeRegisterOK: %v", err)
+	}
+	url, id, err := DecodeRegisterOK(payload)
+	if err != nil {
+		t.Fatalf("DecodeRegisterOK: %v", err)
+	}
+	if url != "app.tunnel.domain.com" || id != 42 {
+		t.Errorf("roundtrip: want (app.tunnel.domain.com, 42), got (%q, %d)", url, id)
+	}
+}
+
+func TestDecodeRegisterOK_Truncated(t *testing.T) {
+	if _, _, err := DecodeRegisterOK(nil); err == nil {
+		t.Error("expected error for empty payload")
+	}
+	if _, _, err := DecodeRegisterOK([]byte{5, 'a', 'b'}); err == nil {
+		t.Error("expected error for truncated payload")
+	}
+}
+
+func TestEncodeHTTPRequest_StringTooLong(t *testing.T) {
+	_, err := EncodeHTTPRequest(HTTPRequest{
+		Method: "GET",
+		Path:   "/" + strings.Repeat("x", 70000),
+	})
+	if err == nil {
+		t.Error("expected error for oversized path string")
 	}
 }
