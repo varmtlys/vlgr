@@ -201,19 +201,19 @@ install_packages() {
 
 # ─── Install Go ───────────────────────────────────────────────────────────────
 ensure_go() {
-  if has_cmd go && [[ "$(go version 2>/dev/null)" =~ go1\.2[2-9] ]]; then
+  if has_cmd go && [[ "$(go version 2>/dev/null)" =~ go1\.2[6-9] ]]; then
     log "Go $(go version | grep -oP 'go\S+') already installed"
     return
   fi
 
-  log "Installing Go 1.22+..."
+  log "Installing Go 1.26+..."
 
   if is_alpine || is_arch || is_suse || is_void; then
     install_packages go
   else
-    local go_ver="1.22.5"
+    local go_ver="1.26.3"
     local go_tar="go${go_ver}.linux-amd64.tar.gz"
-    local go_sha="9a6baf11ae4b72b70dfa8a863235ac3d6f4aa3c1d82b0f3cd87a07957b9715c6"
+    local go_sha="2b2cfc7148493da5e73981bffbf3353af381d5f93e789c82c79aff64962eb556"
     install_packages wget
     wget -q "https://go.dev/dl/${go_tar}" -O "/tmp/${go_tar}"
     echo "${go_sha}  /tmp/${go_tar}" | sha256sum -c --status || { err "Go SHA256 mismatch"; exit 1; }
@@ -322,12 +322,25 @@ build_server() {
     log "Source: $(git log --oneline -1 2>/dev/null || echo 'unknown')"
   fi
 
+  local git_version="dev"
+  if has_cmd git; then
+    git_version="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+  fi
+  local git_commit="unknown"
+  if has_cmd git; then
+    git_commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  fi
+  local build_date
+  build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local version_ldflags
+  version_ldflags="-X vlgr/internal/version.Version=${git_version} -X vlgr/internal/version.GitCommit=${git_commit} -X vlgr/internal/version.BuildDate=${build_date}"
+
   log "Downloading Go dependencies..."
   go mod tidy
 
-  log "Building vlgr-server..."
+  log "Building vlgr-server (${git_version})..."
   mkdir -p "${INSTALL_PATH}/bin"
-  CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "${INSTALL_PATH}/bin/vlgr-server" ./cmd/server
+  CGO_ENABLED=0 go build -trimpath -ldflags="-s -w ${version_ldflags}" -o "${INSTALL_PATH}/bin/vlgr-server" ./cmd/server
 
   if [[ ! -f "${INSTALL_PATH}/bin/vlgr-server" ]]; then
     err "Build failed"
@@ -335,6 +348,7 @@ build_server() {
   fi
 
   log "Server binary: ${INSTALL_PATH}/bin/vlgr-server ($(du -h "${INSTALL_PATH}/bin/vlgr-server" | cut -f1))"
+  log "Built version: $(${INSTALL_PATH}/bin/vlgr-server --version 2>/dev/null || echo 'unknown')"
 }
 
 # ─── Create user ──────────────────────────────────────────────────────────────
@@ -657,11 +671,17 @@ main() {
   fi
 
   # ─── Summary ────────────────────────────────────────────────────────────────
+  local deployed_version="unknown"
+  if [[ -x "${INSTALL_PATH}/bin/vlgr-server" ]]; then
+    deployed_version="$(${INSTALL_PATH}/bin/vlgr-server --version 2>/dev/null || echo 'unknown')"
+  fi
+
   echo ""
   echo -e "\033[1;36m========================================\033[0m"
   echo -e "\033[1;32m  VLGR Server deployed successfully!\033[0m"
   echo -e "\033[1;36m========================================\033[0m"
   echo ""
+  echo -e "  Version:         \033[1;33m${deployed_version}\033[0m"
   echo -e "  Domain:          \033[1;33m${DOMAIN}\033[0m"
   echo -e "  Auth token:      \033[1;33m${TOKEN}\033[0m"
   echo -e "  Binary:          ${INSTALL_PATH}/bin/vlgr-server"
@@ -669,7 +689,7 @@ main() {
   echo -e "  Service:         vlgr-server ($(systemctl is-active vlgr-server 2>/dev/null || echo "not installed"))"
   echo ""
   echo -e "  \033[1;32mConnect a client:\033[0m"
-  echo -e "  ./vlgr-client -server ${DOMAIN}:443 -local 3000 -tls -token ${TOKEN}"
+  echo -e "  ./vlgr-client -s ${DOMAIN}:443 -p 3000 --tls -t ${TOKEN}"
   echo ""
 
   if $INSTALL_CADDY && has_cmd caddy; then

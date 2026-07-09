@@ -93,8 +93,14 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	p.serveWebSocket(w, tunnel, req, subdomain)
+}
+
+// serveWebSocket forwards an Upgrade request through the tunnel and, on 101,
+// hijacks the connection and relays raw bytes in both directions.
+func (p *ReverseProxy) serveWebSocket(w http.ResponseWriter, tunnel *Tunnel, req protocol.HTTPRequest, subdomain string) {
 	if p.debug {
-		log.Printf("[debug] WebSocket upgrade detected for %s", requestPath)
+		log.Printf("[debug] WebSocket upgrade detected for %s", req.Path)
 	}
 	streamData := make(chan []byte, protocol.StreamRelayBuf)
 
@@ -138,7 +144,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if p.debug {
-		log.Printf("[debug] WebSocket relay started for %s (request #%d)", requestPath, requestID)
+		log.Printf("[debug] WebSocket relay started for %s (request #%d)", req.Path, requestID)
 	}
 
 	var wg sync.WaitGroup
@@ -177,7 +183,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn.Close()
 
 	if p.debug {
-		log.Printf("[debug] WebSocket relay ended for %s", requestPath)
+		log.Printf("[debug] WebSocket relay ended for %s", req.Path)
 	}
 }
 

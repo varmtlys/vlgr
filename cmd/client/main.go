@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -13,16 +16,115 @@ import (
 	"time"
 
 	"vlgr/internal/client"
+	"vlgr/internal/version"
 )
 
 var (
 	serverAddr = flag.String("server", "localhost:4443", "Tunnel server address")
-	localPorts = flag.String("local", "", "Local ports to expose, comma-separated (e.g. '8080,3000')")
+	localPorts = flag.String("ports", "", "Local ports to expose, comma-separated (e.g. '8080,3000')")
 	token      = flag.String("token", "", "Authentication token")
-	subdomains = flag.String("subdomain", "", "Request custom subdomains, comma-separated (order matches -local)")
+	subdomains = flag.String("subdomain", "", "Request custom subdomains, comma-separated (order matches -ports)")
 	useTLS     = flag.Bool("tls", false, "Use WSS (TLS) — required when connecting via Caddy/HTTPS")
-	debug      = flag.Bool("debug", false, "Enable verbose debug logging")
+	verbose    = flag.String("verbose", "info", "Log level: info or debug")
+	addPorts   = flag.String("add", "", "Add a port with subdomain to running instance: '<port> <subdomain>'")
+	help       = flag.Bool("h", false, "Show help")
+	showVer    = flag.Bool("version", false, "Show version")
 )
+
+func init() {
+	flag.StringVar(serverAddr, "s", "localhost:4443", "Tunnel server address (shorthand)")
+	flag.StringVar(localPorts, "p", "", "Local ports to expose (shorthand)")
+	flag.StringVar(token, "t", "", "Authentication token (shorthand)")
+	flag.StringVar(subdomains, "u", "", "Request custom subdomains (shorthand)")
+	flag.StringVar(verbose, "V", "info", "Log level (shorthand)")
+	flag.BoolVar(showVer, "v", false, "Show version (shorthand)")
+
+	flag.Usage = printClientHelp
+}
+
+func printClientHelp() {
+	fmt.Print(`vlgr-client — VLGR tunnel client
+Version: ` + version.String() + `
+
+Usage:
+  vlgr-client --ports <ports> [flags]
+  vlgr-client --add "<port> <subdomain>" [flags]
+
+Flags:
+  --server, -s    VLGR server address                            (default localhost:4443)
+  --ports, -p     Local port(s) to expose, comma-separated        (required)
+  --token, -t     Authentication token                            (default empty)
+  --subdomain, -u Request custom subdomain(s), comma-separated    (default auto)
+  --tls           Use WSS (TLS) — required via Caddy/HTTPS        (default false)
+  --verbose, -V   Log level: info (default) or debug
+  --add           Add a port with subdomain to running instance   (e.g. "5000 mysub")
+  --version, -v   Show version and exit
+  --help, -h      Show this help
+
+Examples:
+  vlgr-client -p 3000
+  vlgr-client -s tunnel.domain.com:443 -p 3000 --tls -t mysecret
+  vlgr-client -s tunnel.domain.com:443 -p "8080,3000" -u "api,web" --tls -V debug
+  vlgr-client --add "5000 mysub"
+`)
+}
+
+func ctlFilePath() string {
+	return filepath.Join(os.TempDir(), "vlgr-client.ctl")
+}
+
+func runAddMode() {
+	val := strings.TrimSpace(*addPorts)
+	if val == "" {
+		log.Fatal("usage: --add \"<port> <subdomain>\"")
+	}
+
+	parts := strings.Fields(val)
+	if len(parts) != 2 {
+		log.Fatalf("invalid --add value %q: must be \"<port> <subdomain>\"", val)
+	}
+
+	port, err := strconv.Atoi(parts[0])
+	if err != nil || port < 1 || port > 65535 {
+		log.Fatalf("invalid port in --add: %q", parts[0])
+	}
+	subdomain := parts[1]
+
+	addrBytes, err := os.ReadFile(ctlFilePath())
+	if err != nil {
+		log.Fatalf("no running client found: %v (start vlgr-client first)", err)
+	}
+	ctlAddr := strings.TrimSpace(string(addrBytes))
+
+	conn, err := net.DialTimeout("tcp", ctlAddr, 5*time.Second)
+	if err != nil {
+		log.Fatalf("cannot connect to running client at %s: %v", ctlAddr, err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+
+	cmd := fmt.Sprintf("ADD %d %s\n", port, subdomain)
+	if _, err := fmt.Fprint(conn, cmd); err != nil {
+		log.Fatalf("send command: %v", err)
+	}
+
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		log.Fatalf("read response: %v", err)
+	}
+	line = strings.TrimSpace(line)
+
+	respParts := strings.SplitN(line, " ", 2)
+	if len(respParts) < 2 || respParts[0] != "OK" {
+		msg := "unknown error"
+		if len(respParts) > 1 {
+			msg = respParts[1]
+		}
+		log.Fatalf("add port failed: %s", msg)
+	}
+
+	log.Printf("[client] added: %s -> localhost:%d", respParts[1], port)
+}
 
 func parsePorts(s string) ([]uint16, error) {
 	parts := strings.Split(s, ",")
@@ -64,12 +166,27 @@ func validateServerAddr(s string) error {
 func main() {
 	flag.Parse()
 
+	if *help {
+		printClientHelp()
+		os.Exit(0)
+	}
+
+	if *showVer {
+		fmt.Printf("vlgr-client %s\n", version.String())
+		os.Exit(0)
+	}
+
+	if *addPorts != "" {
+		runAddMode()
+		return
+	}
+
 	if err := validateServerAddr(*serverAddr); err != nil {
 		log.Fatalf("[client] %v", err)
 	}
 
 	if *localPorts == "" {
-		log.Fatal("please specify -local <port> or -local <port1,port2,...>")
+		log.Fatal("please specify -ports <port> or -ports <port1,port2,...>")
 	}
 
 	ports, err := parsePorts(*localPorts)
@@ -101,8 +218,10 @@ func main() {
 		if tunnel != nil {
 			tunnel.Close()
 		}
+		os.Remove(ctlFilePath())
+
 		tunnel = client.NewTunnel(*serverAddr, *token, ports, subs, *useTLS)
-		tunnel.SetDebug(*debug)
+		tunnel.SetDebug(*verbose == "debug")
 
 		if err := tunnel.Connect(); err != nil {
 			log.Printf("[client] connection failed: %v, retrying in %v...", err, backoff)
@@ -117,6 +236,16 @@ func main() {
 				backoff = maxBackoff
 			}
 			continue
+		}
+
+		if err := tunnel.StartControl(); err != nil {
+			log.Printf("[client] control listener start failed: %v", err)
+		} else {
+			ctlAddr := tunnel.ControlAddr()
+			os.WriteFile(ctlFilePath(), []byte(ctlAddr+"\n"), 0600)
+			if *verbose == "debug" {
+				log.Printf("[debug] control socket: %s", ctlAddr)
+			}
 		}
 
 		backoff = 1 * time.Second
@@ -137,6 +266,7 @@ func main() {
 		case <-sigCh:
 			log.Println("[client] shutting down")
 			tunnel.Close()
+			os.Remove(ctlFilePath())
 			return
 		}
 

@@ -8,7 +8,7 @@
 #
 # Available targets: windows/amd64, windows/x86, linux/amd64, linux/x86, linux/arm64, darwin/amd64, darwin/arm64
 #
-# Requires: Go 1.22+ installed and in PATH.
+# Requires: Go 1.26+ installed and in PATH.
 
 param(
     [string]$Targets = ""
@@ -19,7 +19,17 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 
 $buildDir = Join-Path $projectRoot "build"
 
-$ldflags = "-s -w"   # strip debug info, shrink binary
+# Derive version from git (tag, or commit hash if no tags).
+$gitVersion = git describe --tags --always --dirty 2>$null
+if ($LASTEXITCODE -ne 0 -or -not $gitVersion) { $gitVersion = "dev" }
+$gitCommit = git rev-parse --short HEAD 2>$null
+if ($LASTEXITCODE -ne 0 -or -not $gitCommit) { $gitCommit = "unknown" }
+$buildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+$ldflags = "-s -w " +
+    "-X vlgr/internal/version.Version=$gitVersion " +
+    "-X vlgr/internal/version.GitCommit=$gitCommit " +
+    "-X vlgr/internal/version.BuildDate=$buildDate"
 
 $allTargets = @(
     @{OS="windows"; GoArch="amd64"; Label="amd64"; Ext=".exe"},
@@ -38,6 +48,7 @@ $apps = @(
 
 Write-Host "========================================" -ForegroundColor Yellow
 Write-Host "  VLGR Build Script" -ForegroundColor Yellow
+Write-Host "  Version: $gitVersion ($gitCommit, $buildDate)" -ForegroundColor Yellow
 Write-Host "========================================" -ForegroundColor Yellow
 Write-Host ""
 

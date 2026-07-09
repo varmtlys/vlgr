@@ -435,6 +435,134 @@ func TestReadString_RejectsOversizedLength(t *testing.T) {
 	}
 }
 
+func TestEncodeDecodeAuth_Roundtrip(t *testing.T) {
+	encoded, err := EncodeAuth("my-token", "v1.2.3")
+	if err != nil {
+		t.Fatalf("EncodeAuth: %v", err)
+	}
+	token, ver, err := DecodeAuth(encoded)
+	if err != nil {
+		t.Fatalf("DecodeAuth: %v", err)
+	}
+	if token != "my-token" {
+		t.Errorf("token: want %q, got %q", "my-token", token)
+	}
+	if ver != "v1.2.3" {
+		t.Errorf("version: want %q, got %q", "v1.2.3", ver)
+	}
+}
+
+func TestEncodeDecodeAuth_EmptyToken(t *testing.T) {
+	encoded, err := EncodeAuth("", "v1.0.0")
+	if err != nil {
+		t.Fatalf("EncodeAuth: %v", err)
+	}
+	token, ver, err := DecodeAuth(encoded)
+	if err != nil {
+		t.Fatalf("DecodeAuth: %v", err)
+	}
+	if token != "" {
+		t.Errorf("token: want empty, got %q", token)
+	}
+	if ver != "v1.0.0" {
+		t.Errorf("version: want %q, got %q", "v1.0.0", ver)
+	}
+}
+
+func TestEncodeDecodeAuth_EmptyVersion(t *testing.T) {
+	encoded, err := EncodeAuth("tok", "")
+	if err != nil {
+		t.Fatalf("EncodeAuth: %v", err)
+	}
+	token, ver, err := DecodeAuth(encoded)
+	if err != nil {
+		t.Fatalf("DecodeAuth: %v", err)
+	}
+	if token != "tok" {
+		t.Errorf("token: want %q, got %q", "tok", token)
+	}
+	if ver != "" {
+		t.Errorf("version: want empty, got %q", ver)
+	}
+}
+
+func TestEncodeDecodeAuth_TokenTooLong(t *testing.T) {
+	long := strings.Repeat("a", maxStringLen+1)
+	_, err := EncodeAuth(long, "v1.0.0")
+	if err == nil {
+		t.Error("expected error for oversized token")
+	}
+}
+
+func TestEncodeDecodeAuth_VersionTooLong(t *testing.T) {
+	long := strings.Repeat("a", MaxVersionLen+1)
+	_, err := EncodeAuth("tok", long)
+	if err == nil {
+		t.Error("expected error for oversized version")
+	}
+}
+
+func TestDecodeAuth_TruncatedToken(t *testing.T) {
+	var buf bytes.Buffer
+	binaryWriteTo(&buf, uint16(100))
+	_, _, err := DecodeAuth(buf.Bytes())
+	if err == nil {
+		t.Error("expected error for truncated token")
+	}
+}
+
+func TestDecodeAuth_TruncatedVersion(t *testing.T) {
+	var buf bytes.Buffer
+	binaryWriteTo(&buf, uint16(3))
+	buf.WriteString("tok")
+	binaryWriteTo(&buf, uint16(100))
+	_, _, err := DecodeAuth(buf.Bytes())
+	if err == nil {
+		t.Error("expected error for truncated version")
+	}
+}
+
+func TestEncodeDecodeAuthOK_Roundtrip(t *testing.T) {
+	encoded, err := EncodeAuthOK("v2.0.0")
+	if err != nil {
+		t.Fatalf("EncodeAuthOK: %v", err)
+	}
+	ver, err := DecodeAuthOK(encoded)
+	if err != nil {
+		t.Fatalf("DecodeAuthOK: %v", err)
+	}
+	if ver != "v2.0.0" {
+		t.Errorf("version: want %q, got %q", "v2.0.0", ver)
+	}
+}
+
+func TestDecodeAuthOK_Empty(t *testing.T) {
+	ver, err := DecodeAuthOK(nil)
+	if err != nil {
+		t.Fatalf("DecodeAuthOK(nil): %v", err)
+	}
+	if ver != "" {
+		t.Errorf("version: want empty, got %q", ver)
+	}
+}
+
+func TestEncodeAuthOK_TooLong(t *testing.T) {
+	long := strings.Repeat("a", MaxVersionLen+1)
+	_, err := EncodeAuthOK(long)
+	if err == nil {
+		t.Error("expected error for oversized version")
+	}
+}
+
+func TestDecodeAuthOK_Truncated(t *testing.T) {
+	var buf bytes.Buffer
+	binaryWriteTo(&buf, uint16(100))
+	_, err := DecodeAuthOK(buf.Bytes())
+	if err == nil {
+		t.Error("expected error for truncated version")
+	}
+}
+
 func binaryWrite(buf []byte, v uint32) {
 	buf[0] = byte(v >> 24)
 	buf[1] = byte(v >> 16)

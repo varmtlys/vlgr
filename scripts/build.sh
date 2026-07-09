@@ -10,7 +10,7 @@
 #
 # Available targets: windows/amd64, windows/x86, linux/amd64, linux/x86, linux/arm64, darwin/amd64, darwin/arm64
 #
-# Requires: Go 1.22+ installed and in PATH.
+# Requires: Go 1.26+ installed and in PATH.
 
 set -euo pipefail
 
@@ -18,7 +18,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${PROJECT_ROOT}/build"
 
-LDFLAGS="-s -w"
+# Derive version from git (tag, or commit hash if no tags).
+GIT_VERSION="$(git -C "$PROJECT_ROOT" describe --tags --always --dirty 2>/dev/null || echo dev)"
+GIT_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+LDFLAGS="-s -w -X vlgr/internal/version.Version=${GIT_VERSION} -X vlgr/internal/version.GitCommit=${GIT_COMMIT} -X vlgr/internal/version.BuildDate=${BUILD_DATE}"
 
 TARGETS_FILTER=""
 
@@ -86,6 +91,7 @@ build_app() {
 
 echo -e "${YELLOW}========================================"
 echo -e "  VLGR Build Script"
+echo -e "  Version: ${GIT_VERSION} (${GIT_COMMIT}, ${BUILD_DATE})"
 echo -e "========================================${NC}"
 echo ""
 

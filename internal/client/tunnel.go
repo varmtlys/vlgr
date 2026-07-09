@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"vlgr/internal/protocol"
+	"vlgr/internal/version"
 )
 
 var httpClient = &http.Client{
@@ -24,9 +26,7 @@ var httpClient = &http.Client{
 	},
 }
 
-const (
-	maxConcurrentLocalReqs = 100
-)
+const maxConcurrentLocalReqs = 100
 
 type streamRelay struct {
 	conn     net.Conn
@@ -36,6 +36,11 @@ type streamRelay struct {
 
 func (r *streamRelay) closeDone() {
 	r.doneOnce.Do(func() { close(r.done) })
+}
+
+type addResult struct {
+	url string
+	err error
 }
 
 type Tunnel struct {
@@ -49,7 +54,8 @@ type Tunnel struct {
 	conn      *websocket.Conn
 	publicURL string
 
-	mappings map[uint64]uint16
+	mappings   map[uint64]uint16
+	mappingsMu sync.Mutex
 
 	writeMu   sync.Mutex
 	done      chan struct{}
@@ -59,6 +65,13 @@ type Tunnel struct {
 	relaysMu sync.Mutex
 
 	localReqSem chan struct{}
+
+	controlLn   net.Listener
+	controlAddr string
+
+	addMu   sync.Mutex
+	addCh   chan addResult
+	addPort uint16
 }
 
 func NewTunnel(serverAddr, token string, ports []uint16, subdomains []string, useTLS bool) *Tunnel {
@@ -75,8 +88,8 @@ func NewTunnel(serverAddr, token string, ports []uint16, subdomains []string, us
 	}
 }
 
-func (t *Tunnel) SetDebug(enabled bool) {
-	t.debug = enabled
+func (t *Tunnel) SetDebug(debug bool) {
+	t.debug = debug
 }
 
 func (t *Tunnel) Connect() error {
@@ -97,9 +110,13 @@ func (t *Tunnel) Connect() error {
 	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	t.conn = conn
 
+	authPayload, err := protocol.EncodeAuth(t.token, version.Version)
+	if err != nil {
+		return fmt.Errorf("encode auth: %w", err)
+	}
 	authFrame := protocol.EncodeFrame(protocol.Frame{
 		Type:    protocol.MsgAuth,
-		Payload: []byte(t.token),
+		Payload: authPayload,
 	})
 	if err := conn.WriteMessage(websocket.BinaryMessage, authFrame); err != nil {
 		return fmt.Errorf("send auth: %w", err)
@@ -118,6 +135,13 @@ func (t *Tunnel) Connect() error {
 	}
 	if authResp.Type != protocol.MsgAuthOK {
 		return fmt.Errorf("unexpected auth response type: 0x%02x", authResp.Type)
+	}
+
+	serverVersion, err := protocol.DecodeAuthOK(authResp.Payload)
+	if err != nil {
+		log.Printf("[client] warning: could not decode server version: %v", err)
+	} else if serverVersion != "" && serverVersion != version.Version {
+		log.Printf("[client] WARNING: version mismatch — client %q vs server %q; connection may be unstable", version.Version, serverVersion)
 	}
 	log.Printf("[client] authenticated")
 
@@ -149,10 +173,7 @@ func (t *Tunnel) Connect() error {
 		if err != nil {
 			return fmt.Errorf("decode register response for port %d: %w", port, err)
 		}
-		if regResp.Type == protocol.MsgRegisterErr {
-			return fmt.Errorf("registration for port %d failed: %s", port, string(regResp.Payload))
-		}
-		if regResp.Type == protocol.MsgError {
+		if regResp.Type == protocol.MsgRegisterErr || regResp.Type == protocol.MsgError {
 			return fmt.Errorf("registration for port %d failed: %s", port, string(regResp.Payload))
 		}
 		if regResp.Type != protocol.MsgRegisterOK {
@@ -163,7 +184,7 @@ func (t *Tunnel) Connect() error {
 		if err != nil {
 			return fmt.Errorf("register response for port %d: %w", port, err)
 		}
-		t.mappings[tunnelID] = port
+		t.setMapping(tunnelID, port)
 
 		urls = append(urls, publicURL)
 		log.Printf("[client] tunnel ready: %s -> localhost:%d", publicURL, port)
@@ -178,17 +199,15 @@ func (t *Tunnel) Run() {
 	defer t.conn.Close()
 
 	conn := t.conn
-	conn.SetReadLimit(protocol.MaxBodySize + protocol.HeaderSize)
-	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(protocol.PongWait))
 		return nil
 	})
 
 	go t.pingLoop()
 
 	for {
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(protocol.PongWait))
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			log.Printf("[client] read error: %v", err)
@@ -208,12 +227,18 @@ func (t *Tunnel) Run() {
 					frame.TunnelID, frame.RequestID, len(frame.Payload))
 			}
 			go t.handleHTTPReq(frame)
+		case protocol.MsgRegisterOK:
+			t.handleAddResponse(frame, nil)
+		case protocol.MsgRegisterErr:
+			t.handleAddResponse(frame, fmt.Errorf("%s", string(frame.Payload)))
 		case protocol.MsgStreamData:
 			t.handleStreamData(frame)
 		case protocol.MsgStreamClose:
 			t.handleStreamClose(frame)
 		case protocol.MsgError:
-			log.Printf("[client] server error: %s", string(frame.Payload))
+			if !t.handleAddResponse(frame, fmt.Errorf("%s", string(frame.Payload))) {
+				log.Printf("[client] server error: %s", string(frame.Payload))
+			}
 		case protocol.MsgCloseTunnel:
 			log.Printf("[client] server closed tunnel")
 			return
@@ -221,6 +246,40 @@ func (t *Tunnel) Run() {
 			log.Printf("[client] unknown message type: 0x%02x", frame.Type)
 		}
 	}
+}
+
+// handleAddResponse resolves a pending AddPort call; err is non-nil for
+// MsgRegisterErr/MsgError frames. Returns false when no add is pending.
+func (t *Tunnel) handleAddResponse(frame protocol.Frame, err error) bool {
+	t.addMu.Lock()
+	ch := t.addCh
+	port := t.addPort
+	t.addCh = nil
+	t.addMu.Unlock()
+
+	if ch == nil {
+		return false
+	}
+
+	if err != nil {
+		ch <- addResult{err: err}
+		return true
+	}
+
+	url, tunnelID, decErr := protocol.DecodeRegisterOK(frame.Payload)
+	if decErr != nil {
+		ch <- addResult{err: decErr}
+		return true
+	}
+	t.setMapping(tunnelID, port)
+	if t.publicURL == "" {
+		t.publicURL = url
+	} else {
+		t.publicURL += ", " + url
+	}
+	log.Printf("[client] tunnel ready: %s -> localhost:%d", url, port)
+	ch <- addResult{url: url}
+	return true
 }
 
 func (t *Tunnel) handleStreamData(frame protocol.Frame) {
@@ -260,12 +319,128 @@ func (t *Tunnel) handleStreamClose(frame protocol.Frame) {
 	}
 }
 
+func (t *Tunnel) StartControl() error {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	t.controlLn = ln
+	t.controlAddr = ln.Addr().String()
+
+	go t.serveControl()
+	return nil
+}
+
+func (t *Tunnel) ControlAddr() string {
+	return t.controlAddr
+}
+
+func (t *Tunnel) serveControl() {
+	for {
+		conn, err := t.controlLn.Accept()
+		if err != nil {
+			return
+		}
+		go t.handleControlConn(conn)
+	}
+}
+
+func (t *Tunnel) handleControlConn(conn net.Conn) {
+	defer conn.Close()
+	scanner := bufio.NewScanner(conn)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 2 || parts[0] != "ADD" {
+			fmt.Fprintf(conn, "ERR bad command\n")
+			continue
+		}
+		port, err := strconv.Atoi(parts[1])
+		if err != nil || port < 1 || port > 65535 {
+			fmt.Fprintf(conn, "ERR invalid port\n")
+			continue
+		}
+		subdomain := ""
+		if len(parts) > 2 {
+			subdomain = parts[2]
+		}
+
+		url, err := t.AddPort(uint16(port), subdomain)
+		if err != nil {
+			fmt.Fprintf(conn, "ERR %v\n", err)
+		} else {
+			fmt.Fprintf(conn, "OK %s\n", url)
+		}
+	}
+}
+
+func (t *Tunnel) AddPort(port uint16, subdomain string) (string, error) {
+	t.addMu.Lock()
+	if t.addCh != nil {
+		t.addMu.Unlock()
+		return "", fmt.Errorf("another add operation in progress")
+	}
+
+	regPayload, err := protocol.EncodeRegister(port, subdomain)
+	if err != nil {
+		t.addMu.Unlock()
+		return "", err
+	}
+
+	ch := make(chan addResult, 1)
+	t.addCh = ch
+	t.addPort = port
+	t.addMu.Unlock()
+
+	if err := t.writeFrame(protocol.Frame{
+		Type:    protocol.MsgRegister,
+		Payload: regPayload,
+	}); err != nil {
+		t.addMu.Lock()
+		t.addCh = nil
+		t.addMu.Unlock()
+		return "", fmt.Errorf("send register: %w", err)
+	}
+
+	select {
+	case result := <-ch:
+		return result.url, result.err
+	case <-time.After(15 * time.Second):
+		t.addMu.Lock()
+		t.addCh = nil
+		t.addMu.Unlock()
+		return "", fmt.Errorf("add port timeout")
+	}
+}
+
 func (t *Tunnel) pingLoop() {
 	protocol.PingLoop(t.conn, &t.writeMu, t.done)
 }
 
+func (t *Tunnel) setMapping(tunnelID uint64, port uint16) {
+	t.mappingsMu.Lock()
+	t.mappings[tunnelID] = port
+	t.mappingsMu.Unlock()
+}
+
 func (t *Tunnel) portFor(tunnelID uint64) (uint16, bool) {
+	t.mappingsMu.Lock()
 	port, ok := t.mappings[tunnelID]
+	t.mappingsMu.Unlock()
+	return port, ok
+}
+
+// lookupPort resolves the local port for a tunnel, reporting 502 to the
+// server when the tunnel is unknown.
+func (t *Tunnel) lookupPort(tunnelID, requestID uint64) (uint16, bool) {
+	port, ok := t.portFor(tunnelID)
+	if !ok {
+		log.Printf("[client] unknown tunnel ID %d", tunnelID)
+		t.sendHTTPError(tunnelID, requestID, 502, fmt.Sprintf("unknown tunnel %d", tunnelID))
+	}
 	return port, ok
 }
 
@@ -317,10 +492,8 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 }
 
 func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HTTPRequest) {
-	localPort, ok := t.portFor(tunnelID)
+	localPort, ok := t.lookupPort(tunnelID, requestID)
 	if !ok {
-		log.Printf("[client] unknown tunnel ID %d", tunnelID)
-		t.sendHTTPError(tunnelID, requestID, 502, fmt.Sprintf("unknown tunnel %d", tunnelID))
 		return
 	}
 	log.Printf("[client] proxying %s %s -> localhost:%d (body: %d bytes)", req.Method, req.Path, localPort, len(req.Body))
@@ -384,10 +557,8 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 }
 
 func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTTPRequest, release func()) {
-	localPort, ok := t.portFor(tunnelID)
+	localPort, ok := t.lookupPort(tunnelID, requestID)
 	if !ok {
-		log.Printf("[client] unknown tunnel ID %d for WebSocket", tunnelID)
-		t.sendHTTPError(tunnelID, requestID, 502, fmt.Sprintf("unknown tunnel %d", tunnelID))
 		return
 	}
 	log.Printf("[client] WebSocket upgrade: %s %s -> localhost:%d (%d bytes headers payload)", req.Method, req.Path, localPort, len(req.Headers))
@@ -536,6 +707,10 @@ func (t *Tunnel) Close() {
 	t.closeOnce.Do(func() {
 		close(t.done)
 	})
+
+	if t.controlLn != nil {
+		t.controlLn.Close()
+	}
 
 	t.relaysMu.Lock()
 	for id, relay := range t.relays {

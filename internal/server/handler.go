@@ -12,14 +12,15 @@ import (
 	"github.com/gorilla/websocket"
 
 	"vlgr/internal/protocol"
+	"vlgr/internal/version"
 )
 
 type pendingReq struct {
-	response    chan protocol.HTTPResponse
-	streamData  chan []byte
-	done        chan struct{}
-	doneOnce    sync.Once
-	streamOnce  sync.Once
+	response   chan protocol.HTTPResponse
+	streamData chan []byte
+	done       chan struct{}
+	doneOnce   sync.Once
+	streamOnce sync.Once
 }
 
 func (pr *pendingReq) closeDone() {
@@ -42,6 +43,7 @@ type ClientHandler struct {
 	expectedToken string
 	expectedHash  [32]byte
 	authenticated bool
+	clientVersion string
 	debug         bool
 
 	pending      map[uint64]*pendingReq
@@ -146,8 +148,16 @@ func (h *ClientHandler) pingLoop() {
 }
 
 func (h *ClientHandler) handleAuth(frame protocol.Frame) {
+	token, clientVersion, err := protocol.DecodeAuth(frame.Payload)
+	if err != nil {
+		log.Printf("[handler] auth rejected: malformed auth payload: %v", err)
+		h.writeMessage(protocol.MsgAuthErr, 0, 0, []byte("malformed auth"))
+		h.cleanup()
+		return
+	}
+
 	if h.expectedToken != "" {
-		gotHash := sha256.Sum256(frame.Payload)
+		gotHash := sha256.Sum256([]byte(token))
 		if subtle.ConstantTimeCompare(h.expectedHash[:], gotHash[:]) != 1 {
 			log.Printf("[handler] auth rejected: invalid token")
 			h.writeMessage(protocol.MsgAuthErr, 0, 0, []byte("invalid token"))
@@ -156,22 +166,34 @@ func (h *ClientHandler) handleAuth(frame protocol.Frame) {
 		}
 	}
 	h.authenticated = true
+	h.clientVersion = clientVersion
+
+	if clientVersion != "" && clientVersion != version.Version {
+		log.Printf("[handler] WARNING: version mismatch — client %q vs server %q; connection may be unstable", clientVersion, version.Version)
+	}
+
+	authOKPayload, err := protocol.EncodeAuthOK(version.Version)
+	if err != nil {
+		log.Printf("[handler] encode auth ok: %v", err)
+		h.writeMessage(protocol.MsgAuthOK, 0, 0, nil)
+		return
+	}
+	h.writeMessage(protocol.MsgAuthOK, 0, 0, authOKPayload)
 	log.Printf("[handler] client authenticated")
-	h.writeMessage(protocol.MsgAuthOK, 0, 0, nil)
 }
 
 func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 	localPort, requestedSubdomain, err := protocol.DecodeRegister(frame.Payload)
 	if err != nil {
-		h.writeMessage(protocol.MsgRegisterErr, 0, 0, []byte(err.Error()))
+		h.registerErr(err.Error())
 		return
 	}
 	if localPort == 0 {
-		h.writeError(0, "invalid port: 0")
+		h.registerErr("invalid port: 0")
 		return
 	}
 	if !validSubdomain(requestedSubdomain) {
-		h.writeError(0, "invalid subdomain characters")
+		h.registerErr("invalid subdomain characters")
 		return
 	}
 	if requestedSubdomain == "" {
@@ -180,20 +202,20 @@ func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 
 	publicURL := fmt.Sprintf("%s.%s", requestedSubdomain, h.baseDomain)
 	if len(publicURL) > 255 {
-		h.writeMessage(protocol.MsgRegisterErr, 0, 0, []byte("public URL too long"))
+		h.registerErr("public URL too long")
 		return
 	}
 
 	h.mu.Lock()
 	if h.tunnelCount >= protocol.MaxTunnelsPerClient {
 		h.mu.Unlock()
-		h.writeError(0, fmt.Sprintf("too many tunnels: max %d per client", protocol.MaxTunnelsPerClient))
+		h.registerErr(fmt.Sprintf("too many tunnels: max %d per client", protocol.MaxTunnelsPerClient))
 		return
 	}
 	tunnel, err := h.registry.Register(requestedSubdomain, h)
 	if err != nil {
 		h.mu.Unlock()
-		h.writeMessage(protocol.MsgRegisterErr, 0, 0, []byte(err.Error()))
+		h.registerErr(err.Error())
 		return
 	}
 	h.tunnels[tunnel.ID] = tunnel
@@ -378,8 +400,8 @@ func (h *ClientHandler) writeMessage(msgType byte, tunnelID, requestID uint64, p
 	return h.conn.WriteMessage(websocket.BinaryMessage, frame)
 }
 
-func (h *ClientHandler) writeError(requestID uint64, msg string) {
-	h.writeMessage(protocol.MsgError, 0, requestID, []byte(msg))
+func (h *ClientHandler) registerErr(msg string) {
+	h.writeMessage(protocol.MsgRegisterErr, 0, 0, []byte(msg))
 }
 
 func (h *ClientHandler) cleanup() {
@@ -408,7 +430,7 @@ func validSubdomain(s string) bool {
 	if s == "" {
 		return true
 	}
-	if len(s) > 63 {
+	if len(s) > protocol.MaxSubdomainLen {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
