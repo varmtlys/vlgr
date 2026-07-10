@@ -807,3 +807,48 @@ func TestCleanupRace_DoneAndStream_NoPanic(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestHandleUnregister(t *testing.T) {
+	reg := NewRegistry()
+	h := &ClientHandler{
+		authenticated: true,
+		registry:      reg,
+		tunnels:       make(map[uint64]*Tunnel),
+		pending:       make(map[uint64]*pendingReq),
+		baseDomain:    "tunnel.domain.com",
+		done:          make(chan struct{}),
+	}
+
+	tunnel, err := reg.Register("mysub", h)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	h.tunnels[tunnel.ID] = tunnel
+	h.tunnelCount = 1
+
+	h.handleUnregister(protocol.Frame{TunnelID: tunnel.ID})
+
+	if reg.Get("mysub") != nil {
+		t.Error("subdomain should be unregistered")
+	}
+	if len(h.tunnels) != 0 || h.tunnelCount != 0 {
+		t.Errorf("tunnel should be removed from handler: %d tunnels, count %d", len(h.tunnels), h.tunnelCount)
+	}
+}
+
+func TestHandleUnregister_UnknownTunnel(t *testing.T) {
+	h := &ClientHandler{
+		authenticated: true,
+		registry:      NewRegistry(),
+		tunnels:       make(map[uint64]*Tunnel),
+		pending:       make(map[uint64]*pendingReq),
+		baseDomain:    "tunnel.domain.com",
+		done:          make(chan struct{}),
+	}
+
+	// Must not panic and must not change state.
+	h.handleUnregister(protocol.Frame{TunnelID: 12345})
+	if h.tunnelCount != 0 {
+		t.Errorf("tunnelCount changed: %d", h.tunnelCount)
+	}
+}

@@ -27,6 +27,12 @@ const (
 	MsgError       byte = 0x0A
 	MsgStreamData  byte = 0x0B
 	MsgStreamClose byte = 0x0C
+	// Unregister removes a single tunnel (port forward) from a live
+	// connection. The tunnel is identified by the frame's TunnelID; the
+	// error payload carries a human-readable message.
+	MsgUnregister    byte = 0x0D
+	MsgUnregisterOK  byte = 0x0E
+	MsgUnregisterErr byte = 0x0F
 
 	HeaderSize  = 21
 	MaxBodySize = 32 << 20

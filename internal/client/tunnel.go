@@ -84,6 +84,13 @@ type addResult struct {
 	err error
 }
 
+// Forward describes one active port forward (tunnel).
+type Forward struct {
+	TunnelID uint64
+	Port     uint16
+	URL      string
+}
+
 type Tunnel struct {
 	serverAddr string
 	token      string
@@ -92,10 +99,10 @@ type Tunnel struct {
 	useTLS     bool
 	debug      bool
 
-	conn      *websocket.Conn
-	publicURL string
+	conn *websocket.Conn
 
-	mappings   map[uint64]uint16
+	// forwards holds the active tunnels in registration order.
+	forwards   []Forward
 	mappingsMu sync.Mutex
 
 	writeMu   sync.Mutex
@@ -120,6 +127,12 @@ type Tunnel struct {
 	addMu   sync.Mutex
 	addCh   chan addResult
 	addPort uint16
+	delCh   chan error
+	delID   uint64
+
+	// onChange, when set, is called after the set of forwards changes
+	// (used by the tray UI to refresh its menu).
+	onChange func()
 }
 
 func NewTunnel(serverAddr, token string, ports []uint16, subdomains []string, useTLS bool) *Tunnel {
@@ -130,7 +143,6 @@ func NewTunnel(serverAddr, token string, ports []uint16, subdomains []string, us
 		subdomains:  subdomains,
 		useTLS:      useTLS,
 		done:        make(chan struct{}),
-		mappings:    make(map[uint64]uint16),
 		relays:      make(map[uint64]*streamRelay),
 		localReqSem: make(chan struct{}, maxConcurrentLocalReqs),
 		relaySem:    make(chan struct{}, maxConcurrentRelays),
@@ -196,7 +208,6 @@ func (t *Tunnel) Connect() error {
 	}
 	log.Printf("[client] authenticated")
 
-	var urls []string
 	for i, port := range t.ports {
 		subdomain := ""
 		if i < len(t.subdomains) {
@@ -238,13 +249,11 @@ func (t *Tunnel) Connect() error {
 		if err != nil {
 			return fmt.Errorf("register response for port %d: %w", port, err)
 		}
-		t.setMapping(tunnelID, port)
+		t.setMapping(tunnelID, port, publicURL)
 
-		urls = append(urls, publicURL)
 		log.Printf("[client] tunnel ready: %s -> localhost:%d", publicURL, port)
 	}
 
-	t.publicURL = strings.Join(urls, ", ")
 	return nil
 }
 
@@ -293,6 +302,10 @@ func (t *Tunnel) Run() {
 			t.handleAddResponse(frame, nil)
 		case protocol.MsgRegisterErr:
 			t.handleAddResponse(frame, fmt.Errorf("%s", string(frame.Payload)))
+		case protocol.MsgUnregisterOK:
+			t.handleDelResponse(nil)
+		case protocol.MsgUnregisterErr:
+			t.handleDelResponse(fmt.Errorf("%s", string(frame.Payload)))
 		case protocol.MsgStreamData:
 			t.handleStreamData(frame)
 		case protocol.MsgStreamClose:
@@ -333,12 +346,7 @@ func (t *Tunnel) handleAddResponse(frame protocol.Frame, err error) bool {
 		ch <- addResult{err: decErr}
 		return true
 	}
-	t.setMapping(tunnelID, port)
-	if t.publicURL == "" {
-		t.publicURL = url
-	} else {
-		t.publicURL += ", " + url
-	}
+	t.setMapping(tunnelID, port, url)
 	log.Printf("[client] tunnel ready: %s -> localhost:%d", url, port)
 	ch <- addResult{url: url}
 	return true
@@ -461,26 +469,119 @@ func (t *Tunnel) handleControlConn(conn net.Conn) {
 			continue
 		}
 		parts := strings.Fields(line)
-		if len(parts) < 2 || parts[0] != "ADD" {
+		switch parts[0] {
+		case "ADD":
+			if len(parts) < 2 {
+				fmt.Fprintf(conn, "ERR bad command\n")
+				continue
+			}
+			port, err := strconv.Atoi(parts[1])
+			if err != nil || port < 1 || port > 65535 {
+				fmt.Fprintf(conn, "ERR invalid port\n")
+				continue
+			}
+			subdomain := ""
+			if len(parts) > 2 {
+				subdomain = parts[2]
+			}
+			url, err := t.AddPort(uint16(port), subdomain)
+			if err != nil {
+				fmt.Fprintf(conn, "ERR %v\n", err)
+			} else {
+				fmt.Fprintf(conn, "OK %s\n", url)
+			}
+		case "DEL":
+			if len(parts) < 2 {
+				fmt.Fprintf(conn, "ERR bad command\n")
+				continue
+			}
+			port, err := strconv.Atoi(parts[1])
+			if err != nil || port < 1 || port > 65535 {
+				fmt.Fprintf(conn, "ERR invalid port\n")
+				continue
+			}
+			if err := t.RemovePort(uint16(port)); err != nil {
+				fmt.Fprintf(conn, "ERR %v\n", err)
+			} else {
+				fmt.Fprintf(conn, "OK removed port %d\n", port)
+			}
+		case "LIST":
+			// Response: "OK <n>" followed by n lines "<port> <url>".
+			forwards := t.Forwards()
+			fmt.Fprintf(conn, "OK %d\n", len(forwards))
+			for _, f := range forwards {
+				fmt.Fprintf(conn, "%d %s\n", f.Port, f.URL)
+			}
+		default:
 			fmt.Fprintf(conn, "ERR bad command\n")
-			continue
 		}
-		port, err := strconv.Atoi(parts[1])
-		if err != nil || port < 1 || port > 65535 {
-			fmt.Fprintf(conn, "ERR invalid port\n")
-			continue
-		}
-		subdomain := ""
-		if len(parts) > 2 {
-			subdomain = parts[2]
-		}
+	}
+}
 
-		url, err := t.AddPort(uint16(port), subdomain)
-		if err != nil {
-			fmt.Fprintf(conn, "ERR %v\n", err)
-		} else {
-			fmt.Fprintf(conn, "OK %s\n", url)
+// handleDelResponse resolves a pending RemovePort call; err is non-nil for
+// MsgUnregisterErr frames.
+func (t *Tunnel) handleDelResponse(err error) {
+	t.addMu.Lock()
+	ch := t.delCh
+	id := t.delID
+	t.delCh = nil
+	t.addMu.Unlock()
+
+	if ch == nil {
+		return
+	}
+	if err == nil {
+		t.removeMapping(id)
+	}
+	ch <- err
+}
+
+// RemovePort unregisters the forward for the given local port on the server
+// and removes it locally.
+func (t *Tunnel) RemovePort(port uint16) error {
+	var tunnelID uint64
+	found := false
+	t.mappingsMu.Lock()
+	for _, f := range t.forwards {
+		if f.Port == port {
+			tunnelID = f.TunnelID
+			found = true
+			break
 		}
+	}
+	t.mappingsMu.Unlock()
+	if !found {
+		return fmt.Errorf("no forward for port %d", port)
+	}
+
+	t.addMu.Lock()
+	if t.delCh != nil {
+		t.addMu.Unlock()
+		return fmt.Errorf("another delete operation in progress")
+	}
+	ch := make(chan error, 1)
+	t.delCh = ch
+	t.delID = tunnelID
+	t.addMu.Unlock()
+
+	if err := t.writeFrame(protocol.Frame{
+		Type:     protocol.MsgUnregister,
+		TunnelID: tunnelID,
+	}); err != nil {
+		t.addMu.Lock()
+		t.delCh = nil
+		t.addMu.Unlock()
+		return fmt.Errorf("send unregister: %w", err)
+	}
+
+	select {
+	case err := <-ch:
+		return err
+	case <-time.After(15 * time.Second):
+		t.addMu.Lock()
+		t.delCh = nil
+		t.addMu.Unlock()
+		return fmt.Errorf("remove port timeout")
 	}
 }
 
@@ -527,17 +628,55 @@ func (t *Tunnel) pingLoop() {
 	protocol.PingLoop(t.conn, &t.writeMu, t.done)
 }
 
-func (t *Tunnel) setMapping(tunnelID uint64, port uint16) {
+// SetOnChange registers a callback invoked after the set of forwards
+// changes. Must be set before Connect.
+func (t *Tunnel) SetOnChange(fn func()) {
+	t.onChange = fn
+}
+
+func (t *Tunnel) notifyChange() {
+	if t.onChange != nil {
+		t.onChange()
+	}
+}
+
+func (t *Tunnel) setMapping(tunnelID uint64, port uint16, url string) {
 	t.mappingsMu.Lock()
-	t.mappings[tunnelID] = port
+	t.forwards = append(t.forwards, Forward{TunnelID: tunnelID, Port: port, URL: url})
 	t.mappingsMu.Unlock()
+	t.notifyChange()
+}
+
+func (t *Tunnel) removeMapping(tunnelID uint64) {
+	t.mappingsMu.Lock()
+	for i, f := range t.forwards {
+		if f.TunnelID == tunnelID {
+			t.forwards = append(t.forwards[:i], t.forwards[i+1:]...)
+			break
+		}
+	}
+	t.mappingsMu.Unlock()
+	t.notifyChange()
+}
+
+// Forwards returns a snapshot of the active forwards.
+func (t *Tunnel) Forwards() []Forward {
+	t.mappingsMu.Lock()
+	defer t.mappingsMu.Unlock()
+	out := make([]Forward, len(t.forwards))
+	copy(out, t.forwards)
+	return out
 }
 
 func (t *Tunnel) portFor(tunnelID uint64) (uint16, bool) {
 	t.mappingsMu.Lock()
-	port, ok := t.mappings[tunnelID]
-	t.mappingsMu.Unlock()
-	return port, ok
+	defer t.mappingsMu.Unlock()
+	for _, f := range t.forwards {
+		if f.TunnelID == tunnelID {
+			return f.Port, true
+		}
+	}
+	return 0, false
 }
 
 // lookupPort resolves the local port for a tunnel, reporting 502 to the
@@ -943,5 +1082,11 @@ func (t *Tunnel) Close() {
 }
 
 func (t *Tunnel) PublicURL() string {
-	return t.publicURL
+	t.mappingsMu.Lock()
+	defer t.mappingsMu.Unlock()
+	urls := make([]string, 0, len(t.forwards))
+	for _, f := range t.forwards {
+		urls = append(urls, f.URL)
+	}
+	return strings.Join(urls, ", ")
 }

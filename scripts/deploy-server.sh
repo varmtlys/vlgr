@@ -458,12 +458,21 @@ write_service() {
   group="$(get_group)"
   local svc="/etc/systemd/system/vlgr-server.service"
 
+  # Hard dependency on Caddy: systemd starts caddy together with vlgr-server
+  # and refuses to start vlgr-server if caddy cannot be started.
+  local caddy_dep=""
+  if systemctl list-unit-files caddy.service --no-legend 2>/dev/null | grep -q '^caddy\.service'; then
+    caddy_dep="Requires=caddy.service
+After=caddy.service"
+  fi
+
   cat > "$svc" <<SERVICE
 [Unit]
 Description=VLGR Tunnel Server
 Documentation=https://github.com/varmtlys/vlgr
 After=network.target
 Wants=network.target
+${caddy_dep}
 
 [Service]
 Type=simple
@@ -531,6 +540,37 @@ install_caddy() {
   else
     warn "Caddy installation failed. Install manually: https://caddyserver.com/download"
     return 1
+  fi
+
+  # Binary downloads don't ship a systemd unit — create one so vlgr-server
+  # can depend on caddy.service.
+  if ! systemctl list-unit-files caddy.service --no-legend 2>/dev/null | grep -q '^caddy\.service'; then
+    local caddy_bin
+    caddy_bin="$(command -v caddy)"
+    mkdir -p /etc/caddy
+    touch /etc/caddy/Caddyfile
+    cat > /etc/systemd/system/caddy.service <<UNIT
+[Unit]
+Description=Caddy web server
+Documentation=https://caddyserver.com/docs/
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=${caddy_bin} run --environ --config /etc/caddy/Caddyfile
+ExecReload=${caddy_bin} reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload 2>/dev/null || true
+    log "Caddy systemd unit created: /etc/systemd/system/caddy.service"
   fi
 
   # Add Cloudflare DNS plugin
@@ -650,6 +690,20 @@ main() {
   install_binary
   write_config
 
+  # Optional: Caddy (installed before the service phase so the vlgr-server
+  # unit can declare a dependency on caddy.service)
+  if $INSTALL_CADDY; then
+    log "Optional: Installing and configuring Caddy..."
+    install_caddy || warn "Caddy setup incomplete"
+    write_caddy_config
+
+    if has_cmd caddy; then
+      caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
+      systemctl enable caddy 2>/dev/null || true
+      systemctl restart caddy 2>/dev/null || true
+    fi
+  fi
+
   # Phase 5: Service
   log "Phase 5/5: Configuring service..."
   if ! $NO_SERVICE; then
@@ -663,19 +717,6 @@ main() {
     else
       warn "vlgr-server service failed to start. Check: journalctl -u vlgr-server -n 30 --no-pager"
       systemctl status vlgr-server --no-pager || true
-    fi
-  fi
-
-  # Optional: Caddy
-  if $INSTALL_CADDY; then
-    log "Optional: Installing and configuring Caddy..."
-    install_caddy || warn "Caddy setup incomplete"
-    write_caddy_config
-
-    if has_cmd caddy; then
-      caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
-      systemctl enable caddy 2>/dev/null || true
-      systemctl restart caddy 2>/dev/null || true
     fi
   fi
 

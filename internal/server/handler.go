@@ -145,6 +145,8 @@ func (h *ClientHandler) handleFrame(frame protocol.Frame) {
 		h.handleAuth(frame)
 	case protocol.MsgRegister:
 		h.handleRegister(frame)
+	case protocol.MsgUnregister:
+		h.handleUnregister(frame)
 	case protocol.MsgHTTPRes:
 		h.handleHTTPRes(frame)
 	case protocol.MsgStreamData:
@@ -246,6 +248,25 @@ func (h *ClientHandler) handleRegister(frame protocol.Frame) {
 	respPayload, _ := protocol.EncodeRegisterOK(publicURL, tunnel.ID)
 	h.writeMessage(protocol.MsgRegisterOK, tunnel.ID, 0, respPayload)
 	log.Printf("[handler] tunnel registered: %s -> localhost:%d", publicURL, localPort)
+}
+
+func (h *ClientHandler) handleUnregister(frame protocol.Frame) {
+	h.mu.Lock()
+	tunnel, ok := h.tunnels[frame.TunnelID]
+	if ok {
+		delete(h.tunnels, frame.TunnelID)
+		h.tunnelCount--
+	}
+	h.mu.Unlock()
+
+	if !ok {
+		h.writeMessage(protocol.MsgUnregisterErr, frame.TunnelID, 0, []byte("unknown tunnel"))
+		return
+	}
+
+	h.registry.Unregister(tunnel.Subdomain)
+	h.writeMessage(protocol.MsgUnregisterOK, frame.TunnelID, 0, nil)
+	log.Printf("[handler] tunnel %s unregistered by client", tunnel.Subdomain)
 }
 
 func (h *ClientHandler) handleHTTPRes(frame protocol.Frame) {

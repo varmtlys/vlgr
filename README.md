@@ -133,6 +133,9 @@ Every message is wrapped in a fixed binary frame:
 | `0x0A` | `MsgError` | Both | Error message |
 | `0x0B` | `MsgStreamData` | Both | Stream data chunk (WebSocket relay or streamed HTTP body) |
 | `0x0C` | `MsgStreamClose` | Both | Stream close / body EOF |
+| `0x0D` | `MsgUnregister` | Client → Server | Remove one tunnel (identified by frame `TunnelID`) from a live connection |
+| `0x0E` | `MsgUnregisterOK` | Server → Client | Tunnel removed |
+| `0x0F` | `MsgUnregisterErr` | Server → Client | Unregister error (unknown tunnel) |
 
 ### Auth payload (`MsgAuth` / `MsgAuthOK`)
 
@@ -379,9 +382,16 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 | `--subdomain` | `-u` | auto | Request custom subdomain(s), comma-separated — order matches `--ports` |
 | `--tls` | | `false` | Use WSS (TLS) — required when connecting via Caddy/HTTPS |
 | `--verbose` | `-V` | `info` | Log level: `info` (default) or `debug` |
-| `--add` | | | Add a port with subdomain to running instance: `"<port> <subdomain>"` |
+| `--tray` | | `false` | Show a system tray icon for this instance (Windows/Linux) with a menu to view, add and remove forwards |
+| `--add` | | | Add a port with subdomain to a running instance: `"<port> <subdomain>"` — must be used alone |
+| `--del` | | | Remove a port forward (and its subdomain) from a running instance: `<port>` — must be used alone |
 | `--version` | `-v` | | Show version and exit |
 | `--help` | `-h` | | Show help with usage examples |
+
+`--add` and `--del` talk to an already running vlgr-client over its local
+control socket. When several instances run in parallel, a console menu lists
+each instance with its current forwards to pick the target (Ctrl+C cancels);
+with a single instance the command applies immediately.
 
 ---
 
@@ -422,8 +432,12 @@ sudo ./scripts/deploy-server.sh -d tunnel.domain.com -t my-token \
 # Client — multiple tunnels
 ./vlgr-client -s tunnel.domain.com:443 -p "8080,3000,5000" -u "api,web,admin" --tls
 
-# Add ports to running client
+# Add / remove ports on a running client
 ./vlgr-client --add "5000 mysub"
+./vlgr-client --del 5000
+
+# Client with a system tray icon (Windows/Linux)
+./vlgr-client -s tunnel.domain.com:443 -p 3000 --tls --tray
 ```
 
 ---

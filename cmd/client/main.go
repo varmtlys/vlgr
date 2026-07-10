@@ -26,7 +26,9 @@ var (
 	subdomains = flag.String("subdomain", "", "Request custom subdomains, comma-separated (order matches -ports)")
 	useTLS     = flag.Bool("tls", false, "Use WSS (TLS) — required when connecting via Caddy/HTTPS")
 	verbose    = flag.String("verbose", "info", "Log level: info or debug")
-	addPorts   = flag.String("add", "", "Add a port with subdomain to running instance: '<port> <subdomain>'")
+	addPorts   = flag.String("add", "", "Add a port with subdomain to a running instance: '<port> <subdomain>'")
+	delPort    = flag.String("del", "", "Remove a port forward (and its subdomain) from a running instance: '<port>'")
+	useTray    = flag.Bool("tray", false, "Show a system tray icon for this instance")
 	help       = flag.Bool("h", false, "Show help")
 	showVer    = flag.Bool("version", false, "Show version")
 )
@@ -48,7 +50,8 @@ Version: ` + version.String() + `
 
 Usage:
   vlgr-client --ports <ports> [flags]
-  vlgr-client --add "<port> <subdomain>" [flags]
+  vlgr-client --add "<port> <subdomain>"
+  vlgr-client --del <port>
 
 Flags:
   --server, -s    VLGR server address                            (default localhost:4443)
@@ -57,20 +60,192 @@ Flags:
   --subdomain, -u Request custom subdomain(s), comma-separated    (default auto)
   --tls           Use WSS (TLS) — required via Caddy/HTTPS        (default false)
   --verbose, -V   Log level: info (default) or debug
-  --add           Add a port with subdomain to running instance   (e.g. "5000 mysub")
+  --tray          Show a system tray icon for this instance
+  --add           Add a port with subdomain to a running instance (e.g. "5000 mysub")
+  --del           Remove a port forward from a running instance   (e.g. 5000)
   --version, -v   Show version and exit
   --help, -h      Show this help
 
+--add and --del cannot be combined with each other or with any other flag.
+If several instances are running, a console menu asks which instance to
+modify (Ctrl+C cancels).
+
 Examples:
   vlgr-client -p 3000
-  vlgr-client -s tunnel.domain.com:443 -p 3000 --tls -t mysecret
+  vlgr-client -s tunnel.domain.com:443 -p 3000 --tls -t mysecret --tray
   vlgr-client -s tunnel.domain.com:443 -p "8080,3000" -u "api,web" --tls -V debug
   vlgr-client --add "5000 mysub"
+  vlgr-client --del 5000
 `)
 }
 
+// Each instance writes its own control file so several clients can run in
+// parallel; the pid in the name lets --add/--del enumerate them.
 func ctlFilePath() string {
-	return filepath.Join(os.TempDir(), "vlgr-client.ctl")
+	return filepath.Join(os.TempDir(), fmt.Sprintf("vlgr-client-%d.ctl", os.Getpid()))
+}
+
+// instance is a running vlgr-client discovered via its control file.
+type instance struct {
+	pid      int
+	addr     string
+	ctlFile  string
+	forwards []string // "port url" lines from LIST
+}
+
+// discoverInstances scans the temp dir for control files of running clients,
+// queries each for its forwards and silently removes stale files.
+func discoverInstances() []instance {
+	pattern := filepath.Join(os.TempDir(), "vlgr-client-*.ctl")
+	files, _ := filepath.Glob(pattern)
+	// Legacy name used by older versions.
+	if legacy := filepath.Join(os.TempDir(), "vlgr-client.ctl"); fileExists(legacy) {
+		files = append(files, legacy)
+	}
+
+	var out []instance
+	for _, f := range files {
+		addrBytes, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		addr := strings.TrimSpace(string(addrBytes))
+		forwards, err := queryForwards(addr)
+		if err != nil {
+			os.Remove(f) // stale control file — instance is gone
+			continue
+		}
+		pid := 0
+		base := filepath.Base(f)
+		if n, err := fmt.Sscanf(base, "vlgr-client-%d.ctl", &pid); n != 1 || err != nil {
+			pid = 0
+		}
+		out = append(out, instance{pid: pid, addr: addr, ctlFile: f, forwards: forwards})
+	}
+	return out
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// queryForwards runs LIST against a control socket.
+// Response: "OK <n>" followed by n lines "<port> <url>".
+func queryForwards(addr string) ([]string, error) {
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	if _, err := fmt.Fprint(conn, "LIST\n"); err != nil {
+		return nil, err
+	}
+	reader := bufio.NewReader(conn)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	parts := strings.Fields(strings.TrimSpace(line))
+	if len(parts) != 2 || parts[0] != "OK" {
+		return nil, fmt.Errorf("bad LIST response: %q", line)
+	}
+	n, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("bad LIST count: %q", parts[1])
+	}
+	forwards := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		fl, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		forwards = append(forwards, strings.TrimSpace(fl))
+	}
+	return forwards, nil
+}
+
+// selectInstance returns the target instance for --add/--del. With one
+// instance it is used directly; with several a console menu is shown
+// (Ctrl+C aborts the whole operation via default SIGINT handling).
+func selectInstance() instance {
+	instances := discoverInstances()
+	if len(instances) == 0 {
+		log.Fatal("no running vlgr-client instance found (start vlgr-client first)")
+	}
+	if len(instances) == 1 {
+		return instances[0]
+	}
+
+	fmt.Println("Several vlgr-client instances are running:")
+	for i, inst := range instances {
+		label := fmt.Sprintf("pid %d", inst.pid)
+		if inst.pid == 0 {
+			label = inst.addr
+		}
+		desc := "no forwards"
+		if len(inst.forwards) > 0 {
+			var pairs []string
+			for _, f := range inst.forwards {
+				p := strings.SplitN(f, " ", 2)
+				if len(p) == 2 {
+					pairs = append(pairs, fmt.Sprintf("%s -> %s", p[0], p[1]))
+				} else {
+					pairs = append(pairs, f)
+				}
+			}
+			desc = strings.Join(pairs, ", ")
+		}
+		fmt.Printf("  [%d] %s: %s\n", i+1, label, desc)
+	}
+
+	stdin := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Printf("Select instance [1-%d] (Ctrl+C to cancel): ", len(instances))
+		line, err := stdin.ReadString('\n')
+		if err != nil {
+			log.Fatal("cancelled")
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(line))
+		if err == nil && n >= 1 && n <= len(instances) {
+			return instances[n-1]
+		}
+		fmt.Println("invalid choice")
+	}
+}
+
+// sendCtlCommand sends one command to a control socket and returns the
+// response line.
+func sendCtlCommand(addr, cmd string) (string, error) {
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return "", fmt.Errorf("cannot connect to running client at %s: %w", addr, err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
+
+	if _, err := fmt.Fprintf(conn, "%s\n", cmd); err != nil {
+		return "", fmt.Errorf("send command: %w", err)
+	}
+	line, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+	line = strings.TrimSpace(line)
+	respParts := strings.SplitN(line, " ", 2)
+	msg := ""
+	if len(respParts) > 1 {
+		msg = respParts[1]
+	}
+	if respParts[0] != "OK" {
+		if msg == "" {
+			msg = "unknown error"
+		}
+		return "", fmt.Errorf("%s", msg)
+	}
+	return msg, nil
 }
 
 func runAddMode() {
@@ -78,52 +253,54 @@ func runAddMode() {
 	if val == "" {
 		log.Fatal("usage: --add \"<port> <subdomain>\"")
 	}
-
 	parts := strings.Fields(val)
 	if len(parts) != 2 {
 		log.Fatalf("invalid --add value %q: must be \"<port> <subdomain>\"", val)
 	}
-
 	port, err := strconv.Atoi(parts[0])
 	if err != nil || port < 1 || port > 65535 {
 		log.Fatalf("invalid port in --add: %q", parts[0])
 	}
 	subdomain := parts[1]
 
-	addrBytes, err := os.ReadFile(ctlFilePath())
+	inst := selectInstance()
+	msg, err := sendCtlCommand(inst.addr, fmt.Sprintf("ADD %d %s", port, subdomain))
 	if err != nil {
-		log.Fatalf("no running client found: %v (start vlgr-client first)", err)
+		log.Fatalf("add port failed: %v", err)
 	}
-	ctlAddr := strings.TrimSpace(string(addrBytes))
+	log.Printf("[client] added: %s -> localhost:%d", msg, port)
+}
 
-	conn, err := net.DialTimeout("tcp", ctlAddr, 5*time.Second)
-	if err != nil {
-		log.Fatalf("cannot connect to running client at %s: %v", ctlAddr, err)
-	}
-	defer conn.Close()
-	reader := bufio.NewReader(conn)
-
-	cmd := fmt.Sprintf("ADD %d %s\n", port, subdomain)
-	if _, err := fmt.Fprint(conn, cmd); err != nil {
-		log.Fatalf("send command: %v", err)
+func runDelMode() {
+	val := strings.TrimSpace(*delPort)
+	port, err := strconv.Atoi(val)
+	if err != nil || port < 1 || port > 65535 {
+		log.Fatalf("invalid --del value %q: must be a port number", val)
 	}
 
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		log.Fatalf("read response: %v", err)
+	inst := selectInstance()
+	if _, err := sendCtlCommand(inst.addr, fmt.Sprintf("DEL %d", port)); err != nil {
+		log.Fatalf("remove port failed: %v", err)
 	}
-	line = strings.TrimSpace(line)
+	log.Printf("[client] removed forward for localhost:%d", port)
+}
 
-	respParts := strings.SplitN(line, " ", 2)
-	if len(respParts) < 2 || respParts[0] != "OK" {
-		msg := "unknown error"
-		if len(respParts) > 1 {
-			msg = respParts[1]
+// checkExclusiveFlags enforces that --add/--del are used alone.
+func checkExclusiveFlags() {
+	visited := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { visited[f.Name] = true })
+
+	if !visited["add"] && !visited["del"] {
+		return
+	}
+	for name := range visited {
+		if name != "add" && name != "del" {
+			log.Fatalf("--add/--del cannot be combined with other flags (got --%s)", name)
 		}
-		log.Fatalf("add port failed: %s", msg)
 	}
-
-	log.Printf("[client] added: %s -> localhost:%d", respParts[1], port)
+	if visited["add"] && visited["del"] {
+		log.Fatal("--add and --del cannot be used together")
+	}
 }
 
 func parsePorts(s string) ([]uint16, error) {
@@ -176,8 +353,15 @@ func main() {
 		os.Exit(0)
 	}
 
+	checkExclusiveFlags()
+
 	if *addPorts != "" {
 		runAddMode()
+		return
+	}
+
+	if *delPort != "" {
+		runDelMode()
 		return
 	}
 
@@ -210,6 +394,28 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
+	if *useTray {
+		// systray must own the main goroutine; the tunnel loop runs beside
+		// it, and Quit in the tray menu stops everything.
+		tray := client.NewTray(fmt.Sprintf("vlgr — %s (pid %d)", *serverAddr, os.Getpid()), func() {
+			select {
+			case sigCh <- os.Interrupt:
+			default:
+			}
+		})
+		go func() {
+			runLoop(ports, subs, sigCh, tray)
+			tray.Stop()
+		}()
+		tray.Run()
+		return
+	}
+
+	runLoop(ports, subs, sigCh, nil)
+}
+
+// runLoop is the connect/reconnect loop of a foreground client instance.
+func runLoop(ports []uint16, subs []string, sigCh chan os.Signal, tray *client.Tray) {
 	backoff := 1 * time.Second
 	const maxBackoff = 30 * time.Second
 
@@ -222,6 +428,9 @@ func main() {
 
 		tunnel = client.NewTunnel(*serverAddr, *token, ports, subs, *useTLS)
 		tunnel.SetDebug(*verbose == "debug")
+		if tray != nil {
+			tunnel.SetOnChange(tray.Refresh)
+		}
 
 		if err := tunnel.Connect(); err != nil {
 			log.Printf("[client] connection failed: %v, retrying in %v...", err, backoff)
@@ -248,6 +457,10 @@ func main() {
 			}
 		}
 
+		if tray != nil {
+			tray.SetTunnel(tunnel)
+		}
+
 		backoff = 1 * time.Second
 		log.Printf("========================================")
 		log.Printf("  Tunnels: %s", tunnel.PublicURL())
@@ -263,6 +476,9 @@ func main() {
 		select {
 		case <-done:
 			log.Printf("[client] disconnected, reconnecting...")
+			if tray != nil {
+				tray.SetTunnel(nil)
+			}
 		case <-sigCh:
 			log.Println("[client] shutting down")
 			tunnel.Close()

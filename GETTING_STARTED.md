@@ -299,6 +299,8 @@ Create `/etc/systemd/system/vlgr-server.service`:
 [Unit]
 Description=VLGR Tunnel Server
 After=network.target caddy.service
+# Start Caddy together with vlgr-server; refuse to start without it
+Requires=caddy.service
 
 [Service]
 Type=simple
