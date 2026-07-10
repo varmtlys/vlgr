@@ -33,6 +33,14 @@ const (
 	MsgUnregister    byte = 0x0D
 	MsgUnregisterOK  byte = 0x0E
 	MsgUnregisterErr byte = 0x0F
+	// Raw TCP tunnels: the client registers a local port with
+	// MsgRegisterTCP; the server allocates a public TCP port and, for each
+	// incoming connection, sends MsgTCPOpen (carrying TunnelID + a fresh
+	// RequestID). Bytes then flow both ways as MsgStreamData frames keyed by
+	// RequestID, terminated by MsgStreamClose — the same relay machinery as
+	// WebSocket upgrades.
+	MsgRegisterTCP byte = 0x10
+	MsgTCPOpen     byte = 0x11
 
 	HeaderSize  = 21
 	MaxBodySize = 32 << 20
@@ -377,6 +385,24 @@ func DecodeRegisterOK(payload []byte) (publicURL string, tunnelID uint64, err er
 		return "", 0, fmt.Errorf("register response truncated")
 	}
 	return string(payload[1 : 1+n]), binary.BigEndian.Uint64(payload[1+n:]), nil
+}
+
+// TCP register payload: [localPort uint16][remotePort uint16].
+// remotePort is the requested public port, or 0 to let the server pick one.
+// The server replies with MsgRegisterOK whose URL is "host:port".
+
+func EncodeRegisterTCP(localPort, remotePort uint16) []byte {
+	b := make([]byte, 4)
+	binary.BigEndian.PutUint16(b[0:2], localPort)
+	binary.BigEndian.PutUint16(b[2:4], remotePort)
+	return b
+}
+
+func DecodeRegisterTCP(payload []byte) (localPort, remotePort uint16, err error) {
+	if len(payload) < 4 {
+		return 0, 0, fmt.Errorf("tcp register payload too short: %d bytes", len(payload))
+	}
+	return binary.BigEndian.Uint16(payload[0:2]), binary.BigEndian.Uint16(payload[2:4]), nil
 }
 
 // Auth payload: [tokenLen uint16][token][versionLen uint16][version].

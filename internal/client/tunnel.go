@@ -91,13 +91,21 @@ type Forward struct {
 	URL      string
 }
 
+// TCPForward requests a raw TCP tunnel: expose LocalPort on a public TCP
+// port. RemotePort is the requested public port, or 0 to let the server pick.
+type TCPForward struct {
+	LocalPort  uint16
+	RemotePort uint16
+}
+
 type Tunnel struct {
-	serverAddr string
-	token      string
-	ports      []uint16
-	subdomains []string
-	useTLS     bool
-	debug      bool
+	serverAddr  string
+	token       string
+	ports       []uint16
+	subdomains  []string
+	tcpForwards []TCPForward
+	useTLS      bool
+	debug       bool
 
 	conn *websocket.Conn
 
@@ -153,6 +161,12 @@ func NewTunnel(serverAddr, token string, ports []uint16, subdomains []string, us
 
 func (t *Tunnel) SetDebug(debug bool) {
 	t.debug = debug
+}
+
+// SetTCPForwards configures raw TCP tunnels registered during Connect. Must
+// be called before Connect.
+func (t *Tunnel) SetTCPForwards(forwards []TCPForward) {
+	t.tcpForwards = forwards
 }
 
 func (t *Tunnel) Connect() error {
@@ -254,6 +268,39 @@ func (t *Tunnel) Connect() error {
 		log.Printf("[client] tunnel ready: %s -> localhost:%d", publicURL, port)
 	}
 
+	for _, tf := range t.tcpForwards {
+		regFrame := protocol.EncodeFrame(protocol.Frame{
+			Type:    protocol.MsgRegisterTCP,
+			Payload: protocol.EncodeRegisterTCP(tf.LocalPort, tf.RemotePort),
+		})
+		if err := conn.WriteMessage(websocket.BinaryMessage, regFrame); err != nil {
+			return fmt.Errorf("send tcp register for port %d: %w", tf.LocalPort, err)
+		}
+
+		conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+		_, msg, err = conn.ReadMessage()
+		if err != nil {
+			return fmt.Errorf("read tcp register response for port %d: %w", tf.LocalPort, err)
+		}
+		regResp, err := protocol.DecodeFrame(msg)
+		if err != nil {
+			return fmt.Errorf("decode tcp register response for port %d: %w", tf.LocalPort, err)
+		}
+		if regResp.Type == protocol.MsgRegisterErr || regResp.Type == protocol.MsgError {
+			return fmt.Errorf("tcp registration for port %d failed: %s", tf.LocalPort, string(regResp.Payload))
+		}
+		if regResp.Type != protocol.MsgRegisterOK {
+			return fmt.Errorf("unexpected tcp register response type for port %d: 0x%02x", tf.LocalPort, regResp.Type)
+		}
+
+		publicURL, tunnelID, err := protocol.DecodeRegisterOK(regResp.Payload)
+		if err != nil {
+			return fmt.Errorf("tcp register response for port %d: %w", tf.LocalPort, err)
+		}
+		t.setMapping(tunnelID, tf.LocalPort, "tcp://"+publicURL)
+		log.Printf("[client] TCP tunnel ready: tcp://%s -> localhost:%d", publicURL, tf.LocalPort)
+	}
+
 	return nil
 }
 
@@ -306,6 +353,8 @@ func (t *Tunnel) Run() {
 			t.handleDelResponse(nil)
 		case protocol.MsgUnregisterErr:
 			t.handleDelResponse(fmt.Errorf("%s", string(frame.Payload)))
+		case protocol.MsgTCPOpen:
+			go t.handleTCPOpen(frame)
 		case protocol.MsgStreamData:
 			t.handleStreamData(frame)
 		case protocol.MsgStreamClose:
@@ -1014,6 +1063,79 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 			RequestID: requestID,
 			Payload:   buf[:n],
 		}); err != nil {
+			return
+		}
+	}
+}
+
+// handleTCPOpen dials the tunnel's local port for a new public TCP
+// connection and relays bytes both ways. Incoming bytes arrive as
+// MsgStreamData (dispatched to the relay by handleStreamData); outgoing bytes
+// are read here and sent as MsgStreamData, terminated by MsgStreamClose.
+func (t *Tunnel) handleTCPOpen(frame protocol.Frame) {
+	tunnelID, requestID := frame.TunnelID, frame.RequestID
+
+	select {
+	case t.relaySem <- struct{}{}:
+		defer func() { <-t.relaySem }()
+	default:
+		t.writeFrame(protocol.Frame{Type: protocol.MsgStreamClose, TunnelID: tunnelID, RequestID: requestID})
+		return
+	}
+
+	localPort, ok := t.portFor(tunnelID)
+	if !ok {
+		log.Printf("[client] TCP open for unknown tunnel %d", tunnelID)
+		t.writeFrame(protocol.Frame{Type: protocol.MsgStreamClose, TunnelID: tunnelID, RequestID: requestID})
+		return
+	}
+
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", localPort), 10*time.Second)
+	if err != nil {
+		log.Printf("[client] TCP dial localhost:%d error: %v", localPort, err)
+		t.writeFrame(protocol.Frame{Type: protocol.MsgStreamClose, TunnelID: tunnelID, RequestID: requestID})
+		return
+	}
+
+	relay := &streamRelay{conn: conn, done: make(chan struct{})}
+	t.relaysMu.Lock()
+	t.relays[requestID] = relay
+	t.relaysMu.Unlock()
+
+	// Tell the server the local connection is up so it can start forwarding
+	// public bytes (the relay must be registered first, above).
+	t.writeFrame(protocol.Frame{Type: protocol.MsgTCPOpen, TunnelID: tunnelID, RequestID: requestID})
+
+	if t.debug {
+		log.Printf("[debug] TCP relay started for request #%d -> localhost:%d", requestID, localPort)
+	}
+
+	defer func() {
+		relay.closeDone()
+		t.relaysMu.Lock()
+		delete(t.relays, requestID)
+		t.relaysMu.Unlock()
+		conn.Close()
+		t.writeFrame(protocol.Frame{Type: protocol.MsgStreamClose, TunnelID: tunnelID, RequestID: requestID})
+		if t.debug {
+			log.Printf("[debug] TCP relay ended for request #%d", requestID)
+		}
+	}()
+
+	buf := make([]byte, protocol.StreamBufSize)
+	conn.SetReadDeadline(time.Now().Add(protocol.RelayIdleTimeout))
+	for {
+		n, err := conn.Read(buf)
+		if err != nil {
+			return
+		}
+		conn.SetReadDeadline(time.Now().Add(protocol.RelayIdleTimeout))
+		if werr := t.writeFrame(protocol.Frame{
+			Type:      protocol.MsgStreamData,
+			TunnelID:  tunnelID,
+			RequestID: requestID,
+			Payload:   buf[:n],
+		}); werr != nil {
 			return
 		}
 	}

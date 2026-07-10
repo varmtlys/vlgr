@@ -22,6 +22,7 @@ import (
 var (
 	serverAddr = flag.String("server", "localhost:4443", "Tunnel server address")
 	localPorts = flag.String("ports", "", "Local ports to expose, comma-separated (e.g. '8080,3000')")
+	tcpForward = flag.String("tcp", "", "Expose local ports as raw TCP tunnels, comma-separated (e.g. '22' or '22:2222,5432')")
 	token      = flag.String("token", "", "Authentication token")
 	subdomains = flag.String("subdomain", "", "Request custom subdomains, comma-separated (order matches -ports)")
 	useTLS     = flag.Bool("tls", false, "Use WSS (TLS) — required when connecting via Caddy/HTTPS")
@@ -55,7 +56,8 @@ Usage:
 
 Flags:
   --server, -s    VLGR server address                            (default localhost:4443)
-  --ports, -p     Local port(s) to expose, comma-separated        (required)
+  --ports, -p     Local port(s) to expose over HTTP, comma-separated
+  --tcp           Local port(s) to expose as raw TCP, comma-separated (e.g. "22" or "22:2222")
   --token, -t     Authentication token                            (default empty)
   --subdomain, -u Request custom subdomain(s), comma-separated    (default auto)
   --tls           Use WSS (TLS) — required via Caddy/HTTPS        (default false)
@@ -323,6 +325,31 @@ func parsePorts(s string) ([]uint16, error) {
 	return ports, nil
 }
 
+// parseTCPForwards parses "local[:remote],..." into TCP forward specs.
+func parseTCPForwards(s string) ([]client.TCPForward, error) {
+	var out []client.TCPForward
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		localStr, remoteStr, hasRemote := strings.Cut(part, ":")
+		local, err := strconv.Atoi(strings.TrimSpace(localStr))
+		if err != nil || local <= 0 || local > 65535 {
+			return nil, fmt.Errorf("invalid local port in %q", part)
+		}
+		remote := 0
+		if hasRemote {
+			remote, err = strconv.Atoi(strings.TrimSpace(remoteStr))
+			if err != nil || remote < 0 || remote > 65535 {
+				return nil, fmt.Errorf("invalid remote port in %q", part)
+			}
+		}
+		out = append(out, client.TCPForward{LocalPort: uint16(local), RemotePort: uint16(remote)})
+	}
+	return out, nil
+}
+
 var serverAddrRe = regexp.MustCompile(`^[A-Za-z0-9._-]+:[0-9]{1,5}$`)
 
 func validateServerAddr(s string) error {
@@ -369,13 +396,26 @@ func main() {
 		log.Fatalf("[client] %v", err)
 	}
 
-	if *localPorts == "" {
-		log.Fatal("please specify -ports <port> or -ports <port1,port2,...>")
+	if *localPorts == "" && *tcpForward == "" {
+		log.Fatal("please specify --ports <port[,...]> and/or --tcp <port[,...]>")
 	}
 
-	ports, err := parsePorts(*localPorts)
-	if err != nil || len(ports) == 0 {
-		log.Fatalf("invalid port(s): %q", *localPorts)
+	var ports []uint16
+	if *localPorts != "" {
+		var err error
+		ports, err = parsePorts(*localPorts)
+		if err != nil || len(ports) == 0 {
+			log.Fatalf("invalid port(s): %q", *localPorts)
+		}
+	}
+
+	var tcpForwards []client.TCPForward
+	if *tcpForward != "" {
+		var err error
+		tcpForwards, err = parseTCPForwards(*tcpForward)
+		if err != nil || len(tcpForwards) == 0 {
+			log.Fatalf("invalid --tcp value %q: %v", *tcpForward, err)
+		}
 	}
 
 	var subs []string
@@ -404,18 +444,18 @@ func main() {
 			}
 		})
 		go func() {
-			runLoop(ports, subs, sigCh, tray)
+			runLoop(ports, subs, tcpForwards, sigCh, tray)
 			tray.Stop()
 		}()
 		tray.Run()
 		return
 	}
 
-	runLoop(ports, subs, sigCh, nil)
+	runLoop(ports, subs, tcpForwards, sigCh, nil)
 }
 
 // runLoop is the connect/reconnect loop of a foreground client instance.
-func runLoop(ports []uint16, subs []string, sigCh chan os.Signal, tray *client.Tray) {
+func runLoop(ports []uint16, subs []string, tcpForwards []client.TCPForward, sigCh chan os.Signal, tray *client.Tray) {
 	backoff := 1 * time.Second
 	const maxBackoff = 30 * time.Second
 
@@ -427,6 +467,7 @@ func runLoop(ports []uint16, subs []string, sigCh chan os.Signal, tray *client.T
 		os.Remove(ctlFilePath())
 
 		tunnel = client.NewTunnel(*serverAddr, *token, ports, subs, *useTLS)
+		tunnel.SetTCPForwards(tcpForwards)
 		tunnel.SetDebug(*verbose == "debug")
 		if tray != nil {
 			tunnel.SetOnChange(tray.Refresh)

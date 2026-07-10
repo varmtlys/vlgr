@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"log"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,12 +16,33 @@ import (
 	"vlgr/internal/version"
 )
 
+// tcpTunnel is a raw TCP tunnel: a public listener whose connections are
+// relayed to the client's local port.
+type tcpTunnel struct {
+	id         uint64
+	publicPort uint16
+	localPort  uint16
+	ln         net.Listener
+}
+
 type pendingReq struct {
 	response   chan protocol.HTTPResponse
 	streamData chan []byte
 	done       chan struct{}
 	doneOnce   sync.Once
 	streamOnce sync.Once
+	// ready (TCP tunnels only) is closed once the client has opened its
+	// local connection, so the server doesn't forward public bytes into a
+	// relay that isn't wired up yet.
+	ready     chan struct{}
+	readyOnce sync.Once
+}
+
+func (pr *pendingReq) closeReady() {
+	if pr.ready == nil {
+		return
+	}
+	pr.readyOnce.Do(func() { close(pr.ready) })
 }
 
 func (pr *pendingReq) closeDone() {
@@ -46,6 +68,11 @@ type ClientHandler struct {
 	clientVersion string
 	debug         bool
 
+	// TCP tunnel support (nil allocator = TCP disabled on this server).
+	tcpAlloc   *PortAllocator
+	tcpHost    string
+	tcpTunnels map[uint64]*tcpTunnel
+
 	pending      map[uint64]*pendingReq
 	mu           sync.Mutex
 	writeMu      sync.Mutex
@@ -55,7 +82,7 @@ type ClientHandler struct {
 	closeOnce sync.Once
 }
 
-func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain string, expectedToken string, debug bool) *ClientHandler {
+func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain string, expectedToken string, debug bool, tcpAlloc *PortAllocator, tcpHost string) *ClientHandler {
 	h := &ClientHandler{
 		conn:          conn,
 		registry:      registry,
@@ -63,6 +90,9 @@ func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain strin
 		baseDomain:    baseDomain,
 		expectedToken: expectedToken,
 		debug:         debug,
+		tcpAlloc:      tcpAlloc,
+		tcpHost:       tcpHost,
+		tcpTunnels:    make(map[uint64]*tcpTunnel),
 		pending:       make(map[uint64]*pendingReq),
 		done:          make(chan struct{}),
 	}
@@ -147,6 +177,10 @@ func (h *ClientHandler) handleFrame(frame protocol.Frame) {
 		h.handleRegister(frame)
 	case protocol.MsgUnregister:
 		h.handleUnregister(frame)
+	case protocol.MsgRegisterTCP:
+		h.handleRegisterTCP(frame)
+	case protocol.MsgTCPOpen:
+		h.handleTCPReady(frame)
 	case protocol.MsgHTTPRes:
 		h.handleHTTPRes(frame)
 	case protocol.MsgStreamData:
@@ -269,6 +303,168 @@ func (h *ClientHandler) handleUnregister(frame protocol.Frame) {
 	log.Printf("[handler] tunnel %s unregistered by client", tunnel.Subdomain)
 }
 
+func (h *ClientHandler) handleRegisterTCP(frame protocol.Frame) {
+	localPort, remotePort, err := protocol.DecodeRegisterTCP(frame.Payload)
+	if err != nil {
+		h.registerErr(err.Error())
+		return
+	}
+	if localPort == 0 {
+		h.registerErr("invalid port: 0")
+		return
+	}
+	if h.tcpAlloc == nil {
+		h.registerErr("tcp tunnels not enabled on this server")
+		return
+	}
+
+	h.mu.Lock()
+	if h.tunnelCount >= protocol.MaxTunnelsPerClient {
+		h.mu.Unlock()
+		h.registerErr(fmt.Sprintf("too many tunnels: max %d per client", protocol.MaxTunnelsPerClient))
+		return
+	}
+	h.mu.Unlock()
+
+	publicPort, err := h.tcpAlloc.Allocate(remotePort)
+	if err != nil {
+		h.registerErr(err.Error())
+		return
+	}
+
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", publicPort))
+	if err != nil {
+		h.tcpAlloc.Release(publicPort)
+		h.registerErr(fmt.Sprintf("listen on public port %d: %v", publicPort, err))
+		return
+	}
+
+	tt := &tcpTunnel{
+		id:         generateTunnelID(),
+		publicPort: publicPort,
+		localPort:  localPort,
+		ln:         ln,
+	}
+
+	h.mu.Lock()
+	h.tcpTunnels[tt.id] = tt
+	h.tunnelCount++
+	h.mu.Unlock()
+
+	publicURL := fmt.Sprintf("%s:%d", h.tcpHost, publicPort)
+	respPayload, err := protocol.EncodeRegisterOK(publicURL, tt.id)
+	if err != nil {
+		h.closeTCPTunnel(tt)
+		h.registerErr(err.Error())
+		return
+	}
+	h.writeMessage(protocol.MsgRegisterOK, tt.id, 0, respPayload)
+	log.Printf("[handler] TCP tunnel registered: %s -> localhost:%d", publicURL, localPort)
+
+	go h.acceptTCP(tt)
+}
+
+// acceptTCP relays every connection on the public listener to the client.
+// handleTCPReady marks a TCP connection's client-side relay as established.
+func (h *ClientHandler) handleTCPReady(frame protocol.Frame) {
+	h.mu.Lock()
+	pr, ok := h.pending[frame.RequestID]
+	h.mu.Unlock()
+	if ok {
+		pr.closeReady()
+	}
+}
+
+func (h *ClientHandler) acceptTCP(tt *tcpTunnel) {
+	for {
+		conn, err := tt.ln.Accept()
+		if err != nil {
+			return // listener closed on cleanup
+		}
+		go h.handleTCPConn(tt, conn)
+	}
+}
+
+func (h *ClientHandler) handleTCPConn(tt *tcpTunnel, conn net.Conn) {
+	defer conn.Close()
+
+	requestID := h.nextRequestID()
+	pr := &pendingReq{
+		streamData: make(chan []byte, protocol.StreamRelayBuf),
+		done:       make(chan struct{}),
+		ready:      make(chan struct{}),
+	}
+	h.mu.Lock()
+	h.pending[requestID] = pr
+	h.mu.Unlock()
+	defer func() {
+		h.removePending(requestID)
+		pr.closeDone()
+	}()
+
+	// Ask the client to open a matching local connection.
+	if err := h.writeMessage(protocol.MsgTCPOpen, tt.id, requestID, nil); err != nil {
+		return
+	}
+
+	// Wait for the client to confirm its local connection before pumping
+	// public bytes, otherwise early bytes race the relay setup and are lost.
+	select {
+	case <-pr.ready:
+	case <-time.After(protocol.RequestTimeout):
+		return
+	case <-h.done:
+		return
+	}
+
+	// client → public: drain stream data onto the public connection.
+	go func() {
+		for {
+			select {
+			case data, ok := <-pr.streamData:
+				if !ok {
+					conn.Close()
+					return
+				}
+				conn.SetWriteDeadline(time.Now().Add(protocol.WriteWait))
+				if _, err := conn.Write(data); err != nil {
+					conn.Close()
+					return
+				}
+			case <-pr.done:
+				conn.Close()
+				return
+			case <-h.done:
+				conn.Close()
+				return
+			}
+		}
+	}()
+
+	// public → client: read from the public connection into stream frames.
+	buf := make([]byte, protocol.StreamBufSize)
+	conn.SetReadDeadline(time.Now().Add(protocol.RelayIdleTimeout))
+	for {
+		n, err := conn.Read(buf)
+		if n > 0 {
+			// EncodeFrame copies the payload, so buf can be reused.
+			if werr := h.SendStreamData(requestID, buf[:n]); werr != nil {
+				break
+			}
+			conn.SetReadDeadline(time.Now().Add(protocol.RelayIdleTimeout))
+		}
+		if err != nil {
+			break
+		}
+	}
+	h.SendStreamClose(requestID)
+}
+
+func (h *ClientHandler) closeTCPTunnel(tt *tcpTunnel) {
+	tt.ln.Close()
+	h.tcpAlloc.Release(tt.publicPort)
+}
+
 func (h *ClientHandler) handleHTTPRes(frame protocol.Frame) {
 	resp, err := protocol.DecodeHTTPResponse(frame.Payload)
 	if err != nil {
@@ -338,6 +534,9 @@ func (h *ClientHandler) handleStreamClose(frame protocol.Frame) {
 		return
 	}
 
+	// If the client couldn't open its local connection it sends a close
+	// instead of a ready ack; unblock the waiting relay so it tears down.
+	pr.closeReady()
 	pr.closeStream()
 }
 
@@ -470,6 +669,11 @@ func (h *ClientHandler) cleanup() {
 		for _, tunnel := range h.tunnels {
 			h.registry.Unregister(tunnel.Subdomain)
 			log.Printf("[handler] tunnel %s unregistered", tunnel.Subdomain)
+		}
+
+		for _, tt := range h.tcpTunnels {
+			h.closeTCPTunnel(tt)
+			log.Printf("[handler] TCP tunnel :%d closed", tt.publicPort)
 		}
 
 		h.mu.Lock()

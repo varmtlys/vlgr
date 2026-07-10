@@ -107,6 +107,8 @@ func (b *testBackend) close() { b.srv.Close() }
 type testVLGRServer struct {
 	wsAddr   string
 	httpAddr string
+	tcpStart uint16
+	tcpEnd   uint16
 	wsSrv    *http.Server
 	httpSrv  *http.Server
 }
@@ -118,6 +120,11 @@ func startVLGRServer(t *testing.T, baseDomain string, token string) *testVLGRSer
 	wsAddr := fmt.Sprintf("127.0.0.1:%d", wsPort)
 	httpAddr := fmt.Sprintf("127.0.0.1:%d", httpPort)
 
+	// A small public TCP port range for raw TCP tunnel tests.
+	tcpStart := uint16(freePort())
+	tcpEnd := tcpStart + 4
+	tcpAlloc := server.NewPortAllocator(tcpStart, tcpEnd)
+
 	registry := server.NewRegistry()
 	proxy := server.NewReverseProxy(registry, baseDomain, false)
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
@@ -128,7 +135,7 @@ func startVLGRServer(t *testing.T, baseDomain string, token string) *testVLGRSer
 		if err != nil {
 			return
 		}
-		handler := server.NewClientHandler(conn, registry, baseDomain, token, false)
+		handler := server.NewClientHandler(conn, registry, baseDomain, token, false, tcpAlloc, "127.0.0.1")
 		handler.Run()
 	})
 	httpMux := http.NewServeMux()
@@ -140,7 +147,7 @@ func startVLGRServer(t *testing.T, baseDomain string, token string) *testVLGRSer
 	go httpSrv.ListenAndServe()
 	time.Sleep(50 * time.Millisecond)
 
-	return &testVLGRServer{wsAddr: wsAddr, httpAddr: httpAddr, wsSrv: wsSrv, httpSrv: httpSrv}
+	return &testVLGRServer{wsAddr: wsAddr, httpAddr: httpAddr, tcpStart: tcpStart, tcpEnd: tcpEnd, wsSrv: wsSrv, httpSrv: httpSrv}
 }
 
 func (s *testVLGRServer) close() {
@@ -776,5 +783,117 @@ func TestHTTPTunnel_InlineBodyStillInline(t *testing.T) {
 	}
 	if !bytes.Equal(body, payload) {
 		t.Error("echoed inline body does not match")
+	}
+}
+
+// ─── Raw TCP tunnel tests ────────────────────────────────────────────────────
+
+// startTCPEcho starts a local TCP echo server and returns its port.
+func startTCPEcho(t *testing.T) uint16 {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen echo: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				io.Copy(c, c)
+			}(conn)
+		}
+	}()
+	var p uint16
+	fmt.Sscanf(strings.Split(ln.Addr().String(), ":")[1], "%d", &p)
+	return p
+}
+
+// connectTCPTunnel connects a client that exposes localPort as a raw TCP
+// tunnel and returns the assigned public port.
+func connectTCPTunnel(t *testing.T, wsAddr, token string, localPort uint16) uint16 {
+	t.Helper()
+	tun := client.NewTunnel(wsAddr, token, nil, nil, false)
+	tun.SetTCPForwards([]client.TCPForward{{LocalPort: localPort}})
+	if err := tun.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { tun.Close() })
+	go tun.Run()
+	time.Sleep(100 * time.Millisecond)
+
+	// PublicURL is "tcp://127.0.0.1:<port>".
+	url := tun.PublicURL()
+	var p uint16
+	parts := strings.Split(url, ":")
+	fmt.Sscanf(parts[len(parts)-1], "%d", &p)
+	if p == 0 {
+		t.Fatalf("no public TCP port assigned, got %q", url)
+	}
+	return p
+}
+
+func TestRawTCPTunnel_Echo(t *testing.T) {
+	echoPort := startTCPEcho(t)
+
+	srv := startVLGRServer(t, "test.local", "mytoken")
+	defer srv.close()
+
+	pubPort := connectTCPTunnel(t, srv.wsAddr, "mytoken", echoPort)
+
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", pubPort), 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial public TCP port: %v", err)
+	}
+	defer conn.Close()
+
+	msg := []byte("hello raw tcp tunnel")
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := conn.Write(msg); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if !bytes.Equal(buf, msg) {
+		t.Errorf("echo mismatch: want %q got %q", msg, buf)
+	}
+}
+
+func TestRawTCPTunnel_LargeTransfer(t *testing.T) {
+	echoPort := startTCPEcho(t)
+
+	srv := startVLGRServer(t, "test.local", "mytoken")
+	defer srv.close()
+
+	pubPort := connectTCPTunnel(t, srv.wsAddr, "mytoken", echoPort)
+
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", pubPort), 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+	payload := bytes.Repeat([]byte("abcdefgh"), 200*1024) // 1.6 MB, spans many frames
+	done := make(chan error, 1)
+	go func() {
+		buf := make([]byte, len(payload))
+		_, err := io.ReadFull(conn, buf)
+		if err == nil && !bytes.Equal(buf, payload) {
+			err = fmt.Errorf("payload mismatch")
+		}
+		done <- err
+	}()
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("large transfer: %v", err)
 	}
 }
