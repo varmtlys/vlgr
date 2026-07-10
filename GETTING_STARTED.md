@@ -460,8 +460,12 @@ The client prints the assigned public address, e.g. `tcp://tunnel.domain.com:200
 Add `--inspect 127.0.0.1:4040` to record the HTTP requests passing through
 the tunnel and browse them at `http://127.0.0.1:4040` — method, path,
 status, timing, headers and bodies, with live updates and one-click replay
-to the local app. The dashboard is bound locally and is never exposed
-through the tunnel.
+to the local app. `--inspect-limit N` caps how many requests are kept
+(default 1000, max 100000; oldest drop off as new arrive). The dashboard can
+export the captured traffic as **HAR** (`.har`, the standard HTTP Archive
+format read by browser DevTools, Charles, Fiddler, Postman…) or as a plain
+human-readable **text** dump. The dashboard is bound locally and is never
+exposed through the tunnel.
 
 ---
 

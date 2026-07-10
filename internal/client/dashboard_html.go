@@ -49,6 +49,9 @@ const dashboardHTML = `<!doctype html>
   button { font: inherit; background: var(--accent); color: #fff; border: 0; padding: 6px 14px; border-radius: 6px; cursor: pointer; }
   button:disabled { opacity: .5; cursor: not-allowed; }
   .meta { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+  header .spacer { flex: 1; }
+  header a.export { font-size: 12px; color: var(--accent); text-decoration: none; border: 1px solid var(--line); padding: 4px 10px; border-radius: 6px; }
+  header a.export:hover { background: var(--code); }
 </style>
 </head>
 <body>
@@ -56,6 +59,9 @@ const dashboardHTML = `<!doctype html>
   <span class="dot"></span>
   <h1>vlgr inspector</h1>
   <span class="count" id="count">0 requests</span>
+  <span class="spacer"></span>
+  <a class="export" href="/api/export.har" download>Export HAR</a>
+  <a class="export" href="/api/export.txt" download>Export text</a>
 </header>
 <div class="wrap">
   <div class="list">
@@ -131,7 +137,7 @@ const es = new EventSource('/api/stream');
 es.onmessage = ev => {
   const e = JSON.parse(ev.data);
   items.unshift(e);
-  if (items.length > 200) items.pop();
+  if (items.length > __MAX_ENTRIES__) items.pop();
   render();
 };
 </script>

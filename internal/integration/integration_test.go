@@ -912,7 +912,7 @@ func TestInspectorDashboard_RecordAndReplay(t *testing.T) {
 	defer srv.close()
 
 	dashAddr := fmt.Sprintf("127.0.0.1:%d", freePort())
-	dash := client.NewDashboard(dashAddr)
+	dash := client.NewDashboard(dashAddr, 1000)
 	if err := dash.Start(); err != nil {
 		t.Fatalf("dashboard start: %v", err)
 	}

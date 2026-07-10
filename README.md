@@ -429,6 +429,7 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 | `--verbose` | `-V` | `info` | Log level: `info` (default) or `debug` |
 | `--tray` | | `false` | Show a system tray icon for this instance (Windows/Linux) with a menu to view, add and remove forwards |
 | `--inspect` | | | Traffic inspector dashboard address, e.g. `127.0.0.1:4040` (empty = disabled) |
+| `--inspect-limit` | | `1000` | Max rows kept in the inspector (older dropped, new on top); capped at `100000` |
 | `--add` | | | Add a port with subdomain to a running instance: `"<port> <subdomain>"` — must be used alone |
 | `--del` | | | Remove a port forward (and its subdomain) from a running instance: `<port>` — must be used alone |
 | `--version` | `-v` | | Show version and exit |
@@ -471,6 +472,13 @@ to the local app:
 ./vlgr-client -s tunnel.domain.com:443 -p 3000 --tls --inspect 127.0.0.1:4040
 # open http://127.0.0.1:4040
 ```
+
+`--inspect-limit` sets how many requests are retained (default `1000`, capped
+at `100000`); older rows drop off as new ones arrive on top. The dashboard has
+**Export HAR** and **Export text** buttons: HAR (`.har`) is the standard HTTP
+Archive format importable into browser DevTools, Charles, Fiddler, Postman,
+etc.; the text dump is a plain human-readable request/response log. Both are
+also available directly at `/api/export.har` and `/api/export.txt`.
 
 The dashboard is bound locally and never exposed through the tunnel.
 

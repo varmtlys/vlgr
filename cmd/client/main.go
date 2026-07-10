@@ -30,8 +30,9 @@ var (
 	addPorts   = flag.String("add", "", "Add a port with subdomain to a running instance: '<port> <subdomain>'")
 	delPort    = flag.String("del", "", "Remove a port forward (and its subdomain) from a running instance: '<port>'")
 	useTray    = flag.Bool("tray", false, "Show a system tray icon for this instance")
-	inspect    = flag.String("inspect", "", "Enable the traffic inspector dashboard on this address (e.g. 127.0.0.1:4040)")
-	help       = flag.Bool("h", false, "Show help")
+	inspect      = flag.String("inspect", "", "Enable the traffic inspector dashboard on this address (e.g. 127.0.0.1:4040)")
+	inspectLimit = flag.Int("inspect-limit", 1000, "Max rows kept in the inspector (older dropped); capped at 100000")
+	help         = flag.Bool("h", false, "Show help")
 	showVer    = flag.Bool("version", false, "Show version")
 )
 
@@ -65,6 +66,7 @@ Flags:
   --verbose, -V   Log level: info (default) or debug
   --tray          Show a system tray icon for this instance
   --inspect       Traffic inspector dashboard address (e.g. 127.0.0.1:4040)
+  --inspect-limit Max rows kept in the inspector (default 1000, max 100000)
   --add           Add a port with subdomain to a running instance (e.g. "5000 mysub")
   --del           Remove a port forward from a running instance   (e.g. 5000)
   --version, -v   Show version and exit
@@ -435,7 +437,7 @@ func main() {
 
 	var dash *client.Dashboard
 	if *inspect != "" {
-		dash = client.NewDashboard(*inspect)
+		dash = client.NewDashboard(*inspect, *inspectLimit)
 		if err := dash.Start(); err != nil {
 			log.Fatalf("[client] inspector dashboard failed to start on %s: %v", *inspect, err)
 		}
