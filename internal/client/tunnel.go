@@ -141,6 +141,9 @@ type Tunnel struct {
 	// onChange, when set, is called after the set of forwards changes
 	// (used by the tray UI to refresh its menu).
 	onChange func()
+
+	// dash, when set, records HTTP exchanges for the inspector dashboard.
+	dash *Dashboard
 }
 
 func NewTunnel(serverAddr, token string, ports []uint16, subdomains []string, useTLS bool) *Tunnel {
@@ -167,6 +170,11 @@ func (t *Tunnel) SetDebug(debug bool) {
 // be called before Connect.
 func (t *Tunnel) SetTCPForwards(forwards []TCPForward) {
 	t.tcpForwards = forwards
+}
+
+// SetDashboard attaches an inspector that records HTTP exchanges.
+func (t *Tunnel) SetDashboard(d *Dashboard) {
+	t.dash = d
 }
 
 func (t *Tunnel) Connect() error {
@@ -831,6 +839,7 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 
 	copyHeaders(httpReq, req.Headers)
 
+	started := time.Now()
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		log.Printf("[client] local HTTP error: %v", err)
@@ -849,6 +858,11 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 	statusCode := uint16(httpResp.StatusCode)
 	streamed := len(body) > protocol.InlineBodyLimit
 	log.Printf("[client] localhost:%d response: %d %s (%d body bytes, streamed: %v)", localPort, statusCode, http.StatusText(int(statusCode)), len(body), streamed)
+
+	if t.dash != nil {
+		t.dash.recordHTTP(req.Method, req.Path, localPort, req.Headers, req.Body, req.BodyStreamed,
+			int(statusCode), httpResp.Header, body, started)
+	}
 
 	if t.debug {
 		protocol.DebugLogHeaders("[debug] response", httpResp.Header)

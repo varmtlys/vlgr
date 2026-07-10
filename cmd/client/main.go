@@ -30,6 +30,7 @@ var (
 	addPorts   = flag.String("add", "", "Add a port with subdomain to a running instance: '<port> <subdomain>'")
 	delPort    = flag.String("del", "", "Remove a port forward (and its subdomain) from a running instance: '<port>'")
 	useTray    = flag.Bool("tray", false, "Show a system tray icon for this instance")
+	inspect    = flag.String("inspect", "", "Enable the traffic inspector dashboard on this address (e.g. 127.0.0.1:4040)")
 	help       = flag.Bool("h", false, "Show help")
 	showVer    = flag.Bool("version", false, "Show version")
 )
@@ -63,6 +64,7 @@ Flags:
   --tls           Use WSS (TLS) — required via Caddy/HTTPS        (default false)
   --verbose, -V   Log level: info (default) or debug
   --tray          Show a system tray icon for this instance
+  --inspect       Traffic inspector dashboard address (e.g. 127.0.0.1:4040)
   --add           Add a port with subdomain to a running instance (e.g. "5000 mysub")
   --del           Remove a port forward from a running instance   (e.g. 5000)
   --version, -v   Show version and exit
@@ -431,6 +433,14 @@ func main() {
 		log.Fatalf("number of subdomains (%d) must match number of ports (%d)", len(subs), len(ports))
 	}
 
+	var dash *client.Dashboard
+	if *inspect != "" {
+		dash = client.NewDashboard(*inspect)
+		if err := dash.Start(); err != nil {
+			log.Fatalf("[client] inspector dashboard failed to start on %s: %v", *inspect, err)
+		}
+	}
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
@@ -444,18 +454,18 @@ func main() {
 			}
 		})
 		go func() {
-			runLoop(ports, subs, tcpForwards, sigCh, tray)
+			runLoop(ports, subs, tcpForwards, sigCh, tray, dash)
 			tray.Stop()
 		}()
 		tray.Run()
 		return
 	}
 
-	runLoop(ports, subs, tcpForwards, sigCh, nil)
+	runLoop(ports, subs, tcpForwards, sigCh, nil, dash)
 }
 
 // runLoop is the connect/reconnect loop of a foreground client instance.
-func runLoop(ports []uint16, subs []string, tcpForwards []client.TCPForward, sigCh chan os.Signal, tray *client.Tray) {
+func runLoop(ports []uint16, subs []string, tcpForwards []client.TCPForward, sigCh chan os.Signal, tray *client.Tray, dash *client.Dashboard) {
 	backoff := 1 * time.Second
 	const maxBackoff = 30 * time.Second
 
@@ -469,6 +479,9 @@ func runLoop(ports []uint16, subs []string, tcpForwards []client.TCPForward, sig
 		tunnel = client.NewTunnel(*serverAddr, *token, ports, subs, *useTLS)
 		tunnel.SetTCPForwards(tcpForwards)
 		tunnel.SetDebug(*verbose == "debug")
+		if dash != nil {
+			tunnel.SetDashboard(dash)
+		}
 		if tray != nil {
 			tunnel.SetOnChange(tray.Refresh)
 		}
