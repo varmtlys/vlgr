@@ -241,35 +241,9 @@ func (t *Tunnel) Connect() error {
 			return fmt.Errorf("encode register for port %d: %w", port, err)
 		}
 
-		regFrame := protocol.EncodeFrame(protocol.Frame{
-			Type:    protocol.MsgRegister,
-			Payload: regPayload,
-		})
-		if err := conn.WriteMessage(websocket.BinaryMessage, regFrame); err != nil {
-			return fmt.Errorf("send register for port %d: %w", port, err)
-		}
-
-		// Per-response deadline: one absolute deadline for the whole loop
-		// would spuriously fail with many ports on a slow link.
-		conn.SetReadDeadline(time.Now().Add(15 * time.Second))
-		_, msg, err = conn.ReadMessage()
+		publicURL, tunnelID, err := t.registerOne(protocol.MsgRegister, regPayload, fmt.Sprintf("register for port %d", port))
 		if err != nil {
-			return fmt.Errorf("read register response for port %d: %w", port, err)
-		}
-		regResp, err := protocol.DecodeFrame(msg)
-		if err != nil {
-			return fmt.Errorf("decode register response for port %d: %w", port, err)
-		}
-		if regResp.Type == protocol.MsgRegisterErr || regResp.Type == protocol.MsgError {
-			return fmt.Errorf("registration for port %d failed: %s", port, string(regResp.Payload))
-		}
-		if regResp.Type != protocol.MsgRegisterOK {
-			return fmt.Errorf("unexpected register response type for port %d: 0x%02x", port, regResp.Type)
-		}
-
-		publicURL, tunnelID, err := protocol.DecodeRegisterOK(regResp.Payload)
-		if err != nil {
-			return fmt.Errorf("register response for port %d: %w", port, err)
+			return err
 		}
 		t.setMapping(tunnelID, port, publicURL)
 
@@ -277,39 +251,49 @@ func (t *Tunnel) Connect() error {
 	}
 
 	for _, tf := range t.tcpForwards {
-		regFrame := protocol.EncodeFrame(protocol.Frame{
-			Type:    protocol.MsgRegisterTCP,
-			Payload: protocol.EncodeRegisterTCP(tf.LocalPort, tf.RemotePort),
-		})
-		if err := conn.WriteMessage(websocket.BinaryMessage, regFrame); err != nil {
-			return fmt.Errorf("send tcp register for port %d: %w", tf.LocalPort, err)
-		}
-
-		conn.SetReadDeadline(time.Now().Add(15 * time.Second))
-		_, msg, err = conn.ReadMessage()
+		payload := protocol.EncodeRegisterTCP(tf.LocalPort, tf.RemotePort)
+		publicURL, tunnelID, err := t.registerOne(protocol.MsgRegisterTCP, payload, fmt.Sprintf("tcp register for port %d", tf.LocalPort))
 		if err != nil {
-			return fmt.Errorf("read tcp register response for port %d: %w", tf.LocalPort, err)
-		}
-		regResp, err := protocol.DecodeFrame(msg)
-		if err != nil {
-			return fmt.Errorf("decode tcp register response for port %d: %w", tf.LocalPort, err)
-		}
-		if regResp.Type == protocol.MsgRegisterErr || regResp.Type == protocol.MsgError {
-			return fmt.Errorf("tcp registration for port %d failed: %s", tf.LocalPort, string(regResp.Payload))
-		}
-		if regResp.Type != protocol.MsgRegisterOK {
-			return fmt.Errorf("unexpected tcp register response type for port %d: 0x%02x", tf.LocalPort, regResp.Type)
-		}
-
-		publicURL, tunnelID, err := protocol.DecodeRegisterOK(regResp.Payload)
-		if err != nil {
-			return fmt.Errorf("tcp register response for port %d: %w", tf.LocalPort, err)
+			return err
 		}
 		t.setMapping(tunnelID, tf.LocalPort, "tcp://"+publicURL)
 		log.Printf("[client] TCP tunnel ready: tcp://%s -> localhost:%d", publicURL, tf.LocalPort)
 	}
 
 	return nil
+}
+
+// registerOne sends one registration frame during Connect and waits for the
+// MsgRegisterOK reply; desc labels errors (e.g. "register for port 8080").
+func (t *Tunnel) registerOne(msgType byte, payload []byte, desc string) (publicURL string, tunnelID uint64, err error) {
+	frame := protocol.EncodeFrame(protocol.Frame{Type: msgType, Payload: payload})
+	if err := t.conn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
+		return "", 0, fmt.Errorf("send %s: %w", desc, err)
+	}
+
+	// Per-response deadline: one absolute deadline for the whole registration
+	// sequence would spuriously fail with many ports on a slow link.
+	t.conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	_, msg, err := t.conn.ReadMessage()
+	if err != nil {
+		return "", 0, fmt.Errorf("read %s response: %w", desc, err)
+	}
+	resp, err := protocol.DecodeFrame(msg)
+	if err != nil {
+		return "", 0, fmt.Errorf("decode %s response: %w", desc, err)
+	}
+	if resp.Type == protocol.MsgRegisterErr || resp.Type == protocol.MsgError {
+		return "", 0, fmt.Errorf("%s failed: %s", desc, string(resp.Payload))
+	}
+	if resp.Type != protocol.MsgRegisterOK {
+		return "", 0, fmt.Errorf("unexpected %s response type: 0x%02x", desc, resp.Type)
+	}
+
+	publicURL, tunnelID, err = protocol.DecodeRegisterOK(resp.Payload)
+	if err != nil {
+		return "", 0, fmt.Errorf("%s response: %w", desc, err)
+	}
+	return publicURL, tunnelID, nil
 }
 
 func (t *Tunnel) Run() {
@@ -527,7 +511,7 @@ func (t *Tunnel) handleControlConn(conn net.Conn) {
 		}
 		parts := strings.Fields(line)
 		switch parts[0] {
-		case "ADD":
+		case "ADD", "DEL":
 			if len(parts) < 2 {
 				fmt.Fprintf(conn, "ERR bad command\n")
 				continue
@@ -537,24 +521,16 @@ func (t *Tunnel) handleControlConn(conn net.Conn) {
 				fmt.Fprintf(conn, "ERR invalid port\n")
 				continue
 			}
-			subdomain := ""
-			if len(parts) > 2 {
-				subdomain = parts[2]
-			}
-			url, err := t.AddPort(uint16(port), subdomain)
-			if err != nil {
-				fmt.Fprintf(conn, "ERR %v\n", err)
-			} else {
-				fmt.Fprintf(conn, "OK %s\n", url)
-			}
-		case "DEL":
-			if len(parts) < 2 {
-				fmt.Fprintf(conn, "ERR bad command\n")
-				continue
-			}
-			port, err := strconv.Atoi(parts[1])
-			if err != nil || port < 1 || port > 65535 {
-				fmt.Fprintf(conn, "ERR invalid port\n")
+			if parts[0] == "ADD" {
+				subdomain := ""
+				if len(parts) > 2 {
+					subdomain = parts[2]
+				}
+				if url, err := t.AddPort(uint16(port), subdomain); err != nil {
+					fmt.Fprintf(conn, "ERR %v\n", err)
+				} else {
+					fmt.Fprintf(conn, "OK %s\n", url)
+				}
 				continue
 			}
 			if err := t.RemovePort(uint16(port)); err != nil {
@@ -679,6 +655,15 @@ func (t *Tunnel) AddPort(port uint16, subdomain string) (string, error) {
 		t.addMu.Unlock()
 		return "", fmt.Errorf("add port timeout")
 	}
+}
+
+// sendStreamClose terminates a stream (best effort, write errors ignored).
+func (t *Tunnel) sendStreamClose(tunnelID, requestID uint64) {
+	t.writeFrame(protocol.Frame{
+		Type:      protocol.MsgStreamClose,
+		TunnelID:  tunnelID,
+		RequestID: requestID,
+	})
 }
 
 func (t *Tunnel) pingLoop() {
@@ -885,11 +870,9 @@ func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HT
 
 // contentLength extracts Content-Length from tunnel headers, -1 if absent.
 func contentLength(headers map[string][]string) int64 {
-	for k, values := range headers {
-		if strings.EqualFold(k, "Content-Length") && len(values) > 0 {
-			if n, err := strconv.ParseInt(values[0], 10, 64); err == nil {
-				return n
-			}
+	if v := firstHeader(headers, "Content-Length"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return n
 		}
 	}
 	return -1
@@ -923,11 +906,7 @@ func (t *Tunnel) streamResponseBody(tunnelID, requestID uint64, statusCode uint1
 		BodyStreamed: true,
 	})
 
-	defer t.writeFrame(protocol.Frame{
-		Type:      protocol.MsgStreamClose,
-		TunnelID:  tunnelID,
-		RequestID: requestID,
-	})
+	defer t.sendStreamClose(tunnelID, requestID)
 
 	send := func(data []byte) bool {
 		select {
@@ -1051,11 +1030,7 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 		delete(t.relays, requestID)
 		t.relaysMu.Unlock()
 		conn.Close()
-		t.writeFrame(protocol.Frame{
-			Type:      protocol.MsgStreamClose,
-			TunnelID:  tunnelID,
-			RequestID: requestID,
-		})
+		t.sendStreamClose(tunnelID, requestID)
 		if t.debug {
 			log.Printf("[debug] WebSocket relay ended for request #%d", requestID)
 		}
@@ -1093,21 +1068,21 @@ func (t *Tunnel) handleTCPOpen(frame protocol.Frame) {
 	case t.relaySem <- struct{}{}:
 		defer func() { <-t.relaySem }()
 	default:
-		t.writeFrame(protocol.Frame{Type: protocol.MsgStreamClose, TunnelID: tunnelID, RequestID: requestID})
+		t.sendStreamClose(tunnelID, requestID)
 		return
 	}
 
 	localPort, ok := t.portFor(tunnelID)
 	if !ok {
 		log.Printf("[client] TCP open for unknown tunnel %d", tunnelID)
-		t.writeFrame(protocol.Frame{Type: protocol.MsgStreamClose, TunnelID: tunnelID, RequestID: requestID})
+		t.sendStreamClose(tunnelID, requestID)
 		return
 	}
 
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", localPort), 10*time.Second)
 	if err != nil {
 		log.Printf("[client] TCP dial localhost:%d error: %v", localPort, err)
-		t.writeFrame(protocol.Frame{Type: protocol.MsgStreamClose, TunnelID: tunnelID, RequestID: requestID})
+		t.sendStreamClose(tunnelID, requestID)
 		return
 	}
 
@@ -1130,7 +1105,7 @@ func (t *Tunnel) handleTCPOpen(frame protocol.Frame) {
 		delete(t.relays, requestID)
 		t.relaysMu.Unlock()
 		conn.Close()
-		t.writeFrame(protocol.Frame{Type: protocol.MsgStreamClose, TunnelID: tunnelID, RequestID: requestID})
+		t.sendStreamClose(tunnelID, requestID)
 		if t.debug {
 			log.Printf("[debug] TCP relay ended for request #%d", requestID)
 		}

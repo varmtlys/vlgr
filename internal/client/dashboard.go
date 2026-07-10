@@ -287,18 +287,7 @@ func (d *Dashboard) handleReplay(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	for k, values := range e.ReqHeaders {
-		if strings.EqualFold(k, "Content-Length") {
-			continue
-		}
-		if strings.EqualFold(k, "Host") {
-			req.Host = values[0]
-			continue
-		}
-		for _, v := range values {
-			req.Header.Add(k, v)
-		}
-	}
+	copyHeaders(req, e.ReqHeaders)
 
 	resp, err := replayClient.Do(req)
 	if err != nil {
