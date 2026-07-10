@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -65,6 +66,34 @@ Examples:
 `)
 }
 
+// enforceDashStyle rejects long flags written with a single dash and
+// one-letter flags written with two dashes (Go's flag package would silently
+// accept both forms).
+func enforceDashStyle() {
+	for _, arg := range os.Args[1:] {
+		if arg == "--" {
+			break // flag terminator: the rest are positional args
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			continue
+		}
+		name := strings.TrimLeft(arg, "-")
+		if i := strings.IndexByte(name, '='); i >= 0 {
+			name = name[:i]
+		}
+		if name == "" {
+			continue
+		}
+		double := strings.HasPrefix(arg, "--")
+		if len(name) > 1 && !double {
+			log.Fatalf("[server] flag -%s: long flags take two dashes (use --%s)", name, name)
+		}
+		if len(name) == 1 && double {
+			log.Fatalf("[server] flag --%s: one-letter flags take a single dash (use -%s)", name, name)
+		}
+	}
+}
+
 const maxConns = 1000
 
 var connSem = make(chan struct{}, maxConns)
@@ -86,6 +115,7 @@ var upgrader = websocket.Upgrader{
 }
 
 func main() {
+	enforceDashStyle()
 	flag.Parse()
 
 	if *help {

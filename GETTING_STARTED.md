@@ -284,9 +284,9 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o bui
 
 ```bash
 ./build/vlgr-server-linux-amd64 \
-    -addr 127.0.0.1:4443 \
-    -http 127.0.0.1:8080 \
-    -domain tunnel.domain.com
+    --addr 127.0.0.1:4443 \
+    --http 127.0.0.1:8080 \
+    --domain tunnel.domain.com
 ```
 
 Verify the server binds to loopback only:
@@ -317,7 +317,7 @@ WorkingDirectory=/opt/vlgr
 EnvironmentFile=/etc/vlgr/vlgr-server.conf
 # Token is NOT passed as a flag (visible in /proc/PID/cmdline) —
 # the server reads VLGR_TOKEN from the environment (EnvironmentFile above).
-ExecStart=/opt/vlgr/vlgr-server -addr ${VLGR_WS_ADDR} -http ${VLGR_HTTP_ADDR} -domain ${VLGR_DOMAIN}
+ExecStart=/opt/vlgr/vlgr-server --addr ${VLGR_WS_ADDR} --http ${VLGR_HTTP_ADDR} --domain ${VLGR_DOMAIN}
 Restart=always
 RestartSec=5
 TimeoutStopSec=10

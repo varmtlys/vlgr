@@ -444,7 +444,7 @@ sudo ./scripts/deploy-server.sh -d tunnel.domain.com -t my-token \
 
 ```bash
 # Server (VPS)
-./vlgr-server -addr 127.0.0.1:4443 -http 127.0.0.1:8080 -domain tunnel.domain.com
+./vlgr-server --addr 127.0.0.1:4443 --http 127.0.0.1:8080 --domain tunnel.domain.com
 
 # Client (your machine) — single tunnel
 ./vlgr-client -s tunnel.domain.com:443 -p 3000 --tls
