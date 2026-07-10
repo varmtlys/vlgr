@@ -73,20 +73,25 @@ vlgr/
 │   │   └── version_test.go
 │   ├── server/
 │   │   ├── registry.go             # Tunnel registry (subdomain → Tunnel)
-│   │   ├── registry_test.go        # 9 tests: register, get, unregister, concurrency
-│   │   ├── handler.go              # Client WebSocket handler
-│   │   ├── handler_test.go         # 43 tests: auth, registration, unregister, frame dispatch, stream relay, concurrency
+│   │   ├── registry_test.go        # register, get, unregister, concurrency
+│   │   ├── handler.go              # Client WebSocket handler (HTTP + raw TCP tunnels)
+│   │   ├── handler_test.go         # auth, registration, unregister, frame dispatch, stream relay
+│   │   ├── tcp.go                  # Public TCP port allocator for raw TCP tunnels
+│   │   ├── tcp_test.go             # Port allocator: auto/preferred allocation, release, exhaustion
 │   │   ├── proxy.go                # Reverse proxy for incoming HTTP, streamed transfers
-│   │   └── proxy_test.go           # 5 tests: subdomain extraction, response writing, header injection
+│   │   └── proxy_test.go           # subdomain extraction, response writing, header injection
 │   ├── client/
-│   │   ├── tunnel.go               # Client logic: connect, register, proxy, streamed bodies, control socket
-│   │   ├── tunnel_test.go          # 27 tests: routing, WS relay, body streams, error paths
+│   │   ├── tunnel.go               # Client logic: connect, register, proxy, streamed bodies, TCP relay, control socket
+│   │   ├── tunnel_test.go          # routing, WS relay, body streams, error paths
 │   │   ├── tray.go                 # System tray icon and menu (Windows/Linux, fyne.io/systray)
 │   │   ├── tray_stub.go            # No-op Tray for platforms without tray support (keeps darwin builds cgo-free)
 │   │   ├── tray_input_windows.go   # Native input box + browser open (Windows)
-│   │   └── tray_input_linux.go     # Input dialog via zenity/kdialog + xdg-open (Linux)
+│   │   ├── tray_input_linux.go     # Input dialog via zenity/kdialog + xdg-open (Linux)
+│   │   ├── dashboard.go            # Traffic inspector: ring buffer + local web UI + replay
+│   │   ├── dashboard_html.go       # Self-contained inspector single-page UI
+│   │   └── dashboard_test.go       # ring buffer, field capture, listing, body cap
 │   └── integration/
-│       └── integration_test.go     # 24 E2E tests: live server/client/backend, streamed bodies
+│       └── integration_test.go     # E2E: live server/client/backend, streamed bodies, raw TCP, inspector
 │
 ├── scripts/
 │   ├── build.ps1                   # Cross-compile for all platforms (PowerShell)
@@ -142,6 +147,8 @@ Every message is wrapped in a fixed binary frame:
 | `0x0D` | `MsgUnregister` | Client → Server | Remove one tunnel (identified by frame `TunnelID`) from a live connection |
 | `0x0E` | `MsgUnregisterOK` | Server → Client | Tunnel removed |
 | `0x0F` | `MsgUnregisterErr` | Server → Client | Unregister error (unknown tunnel) |
+| `0x10` | `MsgRegisterTCP` | Client → Server | Register a raw TCP tunnel (local port + requested public port) |
+| `0x11` | `MsgTCPOpen` | Both | Server → Client: new public TCP connection to relay. Client → Server: local connection is up (readiness ack) |
 
 ### Auth payload (`MsgAuth` / `MsgAuthOK`)
 
@@ -156,8 +163,9 @@ version field is tolerated for older clients.
 ### Register payload (`MsgRegister` / `MsgRegisterOK`)
 
 ```
-MsgRegister:   [port:2][subdomainLen:1][subdomain]     (subdomain optional)
-MsgRegisterOK: [urlLen:1][publicURL][tunnelID:8]
+MsgRegister:    [port:2][subdomainLen:1][subdomain]     (subdomain optional)
+MsgRegisterTCP: [localPort:2][remotePort:2]             (remotePort 0 = server picks)
+MsgRegisterOK:  [urlLen:1][publicURL][tunnelID:8]        (publicURL is "host:port" for TCP)
 ```
 
 ### HTTP request payload (`MsgHTTPReq`)
@@ -179,6 +187,18 @@ above. Larger bodies set `bodyLen = 0xFFFFFFFF` (`StreamedBodyLen`) with no
 inline body; the body then follows as `MsgStreamData` frames with the same
 `RequestID`, terminated by `MsgStreamClose`. Request bodies stream
 server → client, response bodies client → server; both may stream at once.
+
+### Raw TCP tunnels
+
+Besides HTTP, the client can expose a local port as a raw TCP tunnel
+(`MsgRegisterTCP`). The server allocates a public TCP port from a configured
+range (`--tcp-ports`) and opens a listener on it. For each incoming
+connection it sends `MsgTCPOpen` (carrying the `TunnelID` and a fresh
+`RequestID`); the client dials the local port, then sends `MsgTCPOpen` back
+as a readiness ack so the server doesn't forward bytes before the relay is
+wired up. Data then flows both ways as `MsgStreamData` frames terminated by
+`MsgStreamClose` — the same relay machinery as WebSocket upgrades. Raw TCP
+bypasses Caddy, so its ports must be reachable directly on the server.
 
 ### Keep-alive
 
@@ -274,9 +294,12 @@ host = "abc123.tunnel.domain.com", baseDomain = "tunnel.domain.com"
 **Run():**
 - Reads messages in a loop.
 - `MsgHTTPReq` → spawns `handleHTTPReq` goroutine (concurrent handling), routes to correct `localhost:<port>` by `frame.TunnelID`. A streamed request body is fed to the local app through an `io.Reader` backed by incoming `MsgStreamData` chunks; a response body over 4 MB is pumped back the same way.
-- `MsgStreamData`/`MsgStreamClose` → dispatched to the WebSocket relay, a streamed request body, or a streamed-response cancel signal.
+- `MsgStreamData`/`MsgStreamClose` → dispatched to the WebSocket relay, a raw TCP relay, a streamed request body, or a streamed-response cancel signal.
+- `MsgTCPOpen` → dials the tunnel's local port for a new public TCP connection and relays bytes both ways (raw TCP tunnels).
 - `MsgCloseTunnel` → exits loop.
 - `MsgRegisterOK`/`MsgRegisterErr` and `MsgUnregisterOK`/`MsgUnregisterErr` arriving mid-session resolve a pending `AddPort`/`RemovePort` call.
+
+When `--inspect` is set, each forwarded HTTP exchange is also recorded to the traffic inspector dashboard (see [CLI Flags](#cli-flags)).
 
 **Control socket:**
 Each running instance listens on `127.0.0.1:<random port>` and writes the address to `%TEMP%/vlgr-client-<pid>.ctl` (removed on shutdown). Line-based text commands:
@@ -389,6 +412,7 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 | `--domain` | `-d` | `localhost:8080` | Base domain for tunnel URLs (e.g. `tunnel.domain.com`) |
 | `--token` | `-t` | `""` | Auth token for clients (empty = no auth, or set `VLGR_TOKEN` env) |
 | `--verbose` | `-V` | `info` | Log level: `info` (default) or `debug` |
+| `--tcp-ports` | | | Public TCP port range for raw TCP tunnels, e.g. `20000-20100` (empty = disabled) |
 | `--version` | `-v` | | Show version and exit |
 | `--help` | `-h` | | Show help with usage examples |
 
@@ -397,21 +421,58 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--server` | `-s` | `localhost:4443` | VLGR server address |
-| `--ports` | `-p` | **required** | Local port(s) to expose, comma-separated (e.g. `3000` or `8080,3000`) |
+| `--ports` | `-p` | | Local port(s) to expose over HTTP, comma-separated (e.g. `3000` or `8080,3000`) |
+| `--tcp` | | | Local port(s) to expose as raw TCP, comma-separated: `<local[:remote]>` (e.g. `22` or `22:2222,5432`) |
 | `--token` | `-t` | `""` | Authentication token (required when server has `--token` set) |
 | `--subdomain` | `-u` | auto | Request custom subdomain(s), comma-separated — order matches `--ports` |
 | `--tls` | | `false` | Use WSS (TLS) — required when connecting via Caddy/HTTPS |
 | `--verbose` | `-V` | `info` | Log level: `info` (default) or `debug` |
 | `--tray` | | `false` | Show a system tray icon for this instance (Windows/Linux) with a menu to view, add and remove forwards |
+| `--inspect` | | | Traffic inspector dashboard address, e.g. `127.0.0.1:4040` (empty = disabled) |
 | `--add` | | | Add a port with subdomain to a running instance: `"<port> <subdomain>"` — must be used alone |
 | `--del` | | | Remove a port forward (and its subdomain) from a running instance: `<port>` — must be used alone |
 | `--version` | `-v` | | Show version and exit |
 | `--help` | `-h` | | Show help with usage examples |
 
+At least one of `--ports` or `--tcp` is required.
+
 `--add` and `--del` talk to an already running vlgr-client over its local
 control socket. When several instances run in parallel, a console menu lists
 each instance with its current forwards to pick the target (Ctrl+C cancels);
 with a single instance the command applies immediately.
+
+### Raw TCP tunnels
+
+Enable a public port range on the server, then expose any local TCP service
+(SSH, Postgres, a game server) through it:
+
+```bash
+# Server: allow public TCP ports 20000-20100
+./vlgr-server --domain tunnel.domain.com --tcp-ports 20000-20100
+
+# Client: expose local SSH (22) on an auto-assigned public port
+./vlgr-client -s tunnel.domain.com:443 --tls --tcp 22
+
+# Client: pin the public port (22 -> tunnel.domain.com:2222)
+./vlgr-client -s tunnel.domain.com:443 --tls --tcp 22:2222
+```
+
+Raw TCP bypasses Caddy, so the chosen port range must be open on the server's
+firewall and reachable directly (not behind the HTTPS reverse proxy).
+
+### Traffic inspector
+
+`--inspect <addr>` starts a local web dashboard (à la ngrok's `localhost:4040`)
+that records the HTTP requests flowing through the tunnel — method, path,
+status, timing, headers and bodies — with live updates and one-click replay
+to the local app:
+
+```bash
+./vlgr-client -s tunnel.domain.com:443 -p 3000 --tls --inspect 127.0.0.1:4040
+# open http://127.0.0.1:4040
+```
+
+The dashboard is bound locally and never exposed through the tunnel.
 
 ---
 
@@ -458,6 +519,10 @@ sudo ./scripts/deploy-server.sh -d tunnel.domain.com -t my-token \
 
 # Client with a system tray icon (Windows/Linux)
 ./vlgr-client -s tunnel.domain.com:443 -p 3000 --tls --tray
+
+# Raw TCP tunnel (server needs --tcp-ports) + local traffic inspector
+./vlgr-client -s tunnel.domain.com:443 --tls --tcp 22:2222
+./vlgr-client -s tunnel.domain.com:443 -p 3000 --tls --inspect 127.0.0.1:4040
 ```
 
 ---

@@ -2,6 +2,7 @@ package integration
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -837,63 +838,127 @@ func connectTCPTunnel(t *testing.T, wsAddr, token string, localPort uint16) uint
 	return p
 }
 
-func TestRawTCPTunnel_Echo(t *testing.T) {
+// TestRawTCPTunnel exercises one TCP tunnel (echo backend) across several
+// scenarios: a small echo, a large multi-frame transfer, and a second
+// connection reusing the same tunnel.
+func TestRawTCPTunnel(t *testing.T) {
 	echoPort := startTCPEcho(t)
 
 	srv := startVLGRServer(t, "test.local", "mytoken")
 	defer srv.close()
 
 	pubPort := connectTCPTunnel(t, srv.wsAddr, "mytoken", echoPort)
+	addr := fmt.Sprintf("127.0.0.1:%d", pubPort)
 
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", pubPort), 3*time.Second)
-	if err != nil {
-		t.Fatalf("dial public TCP port: %v", err)
-	}
-	defer conn.Close()
+	// roundtrip opens a fresh public connection, writes payload and asserts
+	// the echo backend returns it unchanged.
+	roundtrip := func(t *testing.T, payload []byte, timeout time.Duration) {
+		conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+		if err != nil {
+			t.Fatalf("dial public TCP port: %v", err)
+		}
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(timeout))
 
-	msg := []byte("hello raw tcp tunnel")
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
-	if _, err := conn.Write(msg); err != nil {
-		t.Fatalf("write: %v", err)
+		done := make(chan error, 1)
+		go func() {
+			buf := make([]byte, len(payload))
+			_, err := io.ReadFull(conn, buf)
+			if err == nil && !bytes.Equal(buf, payload) {
+				err = fmt.Errorf("payload mismatch")
+			}
+			done <- err
+		}()
+		if _, err := conn.Write(payload); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := <-done; err != nil {
+			t.Fatalf("roundtrip: %v", err)
+		}
 	}
-	buf := make([]byte, len(msg))
-	if _, err := io.ReadFull(conn, buf); err != nil {
-		t.Fatalf("read echo: %v", err)
-	}
-	if !bytes.Equal(buf, msg) {
-		t.Errorf("echo mismatch: want %q got %q", msg, buf)
-	}
+
+	t.Run("echo", func(t *testing.T) {
+		roundtrip(t, []byte("hello raw tcp tunnel"), 3*time.Second)
+	})
+	t.Run("large multi-frame transfer", func(t *testing.T) {
+		roundtrip(t, bytes.Repeat([]byte("abcdefgh"), 200*1024), 10*time.Second) // 1.6 MB
+	})
+	t.Run("second connection on same tunnel", func(t *testing.T) {
+		roundtrip(t, []byte("second connection over the same tunnel"), 3*time.Second)
+	})
 }
 
-func TestRawTCPTunnel_LargeTransfer(t *testing.T) {
-	echoPort := startTCPEcho(t)
+// ─── Traffic inspector dashboard tests ───────────────────────────────────────
+
+func dashList(t *testing.T, addr string) []map[string]any {
+	t.Helper()
+	resp, err := http.Get("http://" + addr + "/api/requests")
+	if err != nil {
+		t.Fatalf("dashboard list: %v", err)
+	}
+	defer resp.Body.Close()
+	var out []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode dashboard list: %v", err)
+	}
+	return out
+}
+
+func TestInspectorDashboard_RecordAndReplay(t *testing.T) {
+	backend := startBackend(t)
+	defer backend.close()
 
 	srv := startVLGRServer(t, "test.local", "mytoken")
 	defer srv.close()
 
-	pubPort := connectTCPTunnel(t, srv.wsAddr, "mytoken", echoPort)
+	dashAddr := fmt.Sprintf("127.0.0.1:%d", freePort())
+	dash := client.NewDashboard(dashAddr)
+	if err := dash.Start(); err != nil {
+		t.Fatalf("dashboard start: %v", err)
+	}
+	t.Cleanup(dash.Stop)
 
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", pubPort), 3*time.Second)
+	tun := client.NewTunnel(srv.wsAddr, "mytoken", []uint16{backend.port()}, nil, false)
+	tun.SetDashboard(dash)
+	if err := tun.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { tun.Close() })
+	go tun.Run()
+	time.Sleep(100 * time.Millisecond)
+
+	host := extractSubdomain(tun.PublicURL(), "test.local") + ".test.local"
+
+	// Drive a request through the tunnel; the inspector must record it.
+	httpPost(t, srv.httpAddr, host, "/echo", []byte("recorded-body"), "text/plain")
+	time.Sleep(100 * time.Millisecond)
+
+	entries := dashList(t, dashAddr)
+	if len(entries) < 1 {
+		t.Fatalf("expected >=1 recorded request, got %d", len(entries))
+	}
+	if entries[0]["method"] != "POST" || entries[0]["path"] != "/echo" {
+		t.Errorf("unexpected recorded entry: %+v", entries[0])
+	}
+	id := int(entries[0]["id"].(float64))
+
+	// Replay re-issues the request to the local app and records a new entry.
+	req, _ := http.NewRequest("POST", fmt.Sprintf("http://%s/api/replay/%d", dashAddr, id), nil)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("dial: %v", err)
+		t.Fatalf("replay: %v", err)
 	}
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	resp.Body.Close()
+	if resp.StatusCode != 204 {
+		t.Fatalf("replay status: want 204, got %d", resp.StatusCode)
+	}
+	time.Sleep(100 * time.Millisecond)
 
-	payload := bytes.Repeat([]byte("abcdefgh"), 200*1024) // 1.6 MB, spans many frames
-	done := make(chan error, 1)
-	go func() {
-		buf := make([]byte, len(payload))
-		_, err := io.ReadFull(conn, buf)
-		if err == nil && !bytes.Equal(buf, payload) {
-			err = fmt.Errorf("payload mismatch")
-		}
-		done <- err
-	}()
-	if _, err := conn.Write(payload); err != nil {
-		t.Fatalf("write: %v", err)
+	entries = dashList(t, dashAddr)
+	if len(entries) < 2 {
+		t.Fatalf("expected replay to add an entry, got %d", len(entries))
 	}
-	if err := <-done; err != nil {
-		t.Fatalf("large transfer: %v", err)
+	if entries[0]["replayed"] != true {
+		t.Errorf("newest entry should be a replay: %+v", entries[0])
 	}
 }

@@ -438,6 +438,31 @@ forwards, open them in the browser, remove them, and add new ones via an
 input dialog (`<port> [subdomain]`; on Linux this needs `zenity` or
 `kdialog`). *Quit* stops the instance.
 
+### Raw TCP tunnels
+
+For non-HTTP services (SSH, databases, game servers), expose a local TCP
+port instead of an HTTP forward. Enable a public port range on the server
+and open it on the firewall (these ports bypass Caddy and are reached
+directly):
+
+```bash
+# Server: allow public TCP ports 20000-20100
+./vlgr-server --domain tunnel.domain.com --tcp-ports 20000-20100
+
+# Client: expose local SSH on an auto-assigned public port (or pin it with 22:2222)
+./vlgr-client -s tunnel.domain.com:443 --tls --tcp 22
+```
+
+The client prints the assigned public address, e.g. `tcp://tunnel.domain.com:20000`.
+
+### Traffic inspector
+
+Add `--inspect 127.0.0.1:4040` to record the HTTP requests passing through
+the tunnel and browse them at `http://127.0.0.1:4040` — method, path,
+status, timing, headers and bodies, with live updates and one-click replay
+to the local app. The dashboard is bound locally and is never exposed
+through the tunnel.
+
 ---
 
 ## Step 8: End-to-End Test
