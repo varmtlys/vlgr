@@ -284,9 +284,9 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o bui
 
 ```bash
 ./build/vlgr-server-linux-amd64 \
-    -addr 127.0.0.1:4443 \
-    -http 127.0.0.1:8080 \
-    -domain tunnel.domain.com
+    --addr 127.0.0.1:4443 \
+    --http 127.0.0.1:8080 \
+    --domain tunnel.domain.com
 ```
 
 Verify the server binds to loopback only:
@@ -317,7 +317,7 @@ WorkingDirectory=/opt/vlgr
 EnvironmentFile=/etc/vlgr/vlgr-server.conf
 # Token is NOT passed as a flag (visible in /proc/PID/cmdline) —
 # the server reads VLGR_TOKEN from the environment (EnvironmentFile above).
-ExecStart=/opt/vlgr/vlgr-server -addr ${VLGR_WS_ADDR} -http ${VLGR_HTTP_ADDR} -domain ${VLGR_DOMAIN}
+ExecStart=/opt/vlgr/vlgr-server --addr ${VLGR_WS_ADDR} --http ${VLGR_HTTP_ADDR} --domain ${VLGR_DOMAIN}
 Restart=always
 RestartSec=5
 TimeoutStopSec=10
@@ -437,6 +437,35 @@ On Windows and Linux, add `--tray` to show a tray icon for the instance
 forwards, open them in the browser, remove them, and add new ones via an
 input dialog (`<port> [subdomain]`; on Linux this needs `zenity` or
 `kdialog`). *Quit* stops the instance.
+
+### Raw TCP tunnels
+
+For non-HTTP services (SSH, databases, game servers), expose a local TCP
+port instead of an HTTP forward. Enable a public port range on the server
+and open it on the firewall (these ports bypass Caddy and are reached
+directly):
+
+```bash
+# Server: allow public TCP ports 20000-20100
+./vlgr-server --domain tunnel.domain.com --tcp-ports 20000-20100
+
+# Client: expose local SSH on an auto-assigned public port (or pin it with 22:2222)
+./vlgr-client -s tunnel.domain.com:443 --tls --tcp 22
+```
+
+The client prints the assigned public address, e.g. `tcp://tunnel.domain.com:20000`.
+
+### Traffic inspector
+
+Add `--inspect 127.0.0.1:4040` to record the HTTP requests passing through
+the tunnel and browse them at `http://127.0.0.1:4040` — method, path,
+status, timing, headers and bodies, with live updates and one-click replay
+to the local app. `--inspect-limit N` caps how many requests are kept
+(default 1000, max 100000; oldest drop off as new arrive). The dashboard can
+export the captured traffic as **HAR** (`.har`, the standard HTTP Archive
+format read by browser DevTools, Charles, Fiddler, Postman…) or as a plain
+human-readable **text** dump. The dashboard is bound locally and is never
+exposed through the tunnel.
 
 ---
 

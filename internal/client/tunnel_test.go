@@ -48,7 +48,7 @@ func TestTunnel_SetDebug(t *testing.T) {
 
 func TestPortFor_Found(t *testing.T) {
 	tun := NewTunnel("x", "", nil, nil, false)
-	tun.setMapping(42, 3000, "test.example.com")
+	tun.setMapping(42, 3000, "test.domain.com")
 	port, ok := tun.portFor(42)
 	if !ok {
 		t.Error("portFor should return true for known ID")
@@ -103,7 +103,7 @@ func TestHandleStreamClose_NoRelay(t *testing.T) {
 
 func TestHandleHTTPReq_DecodeError(t *testing.T) {
 	tun := NewTunnel("x", "", nil, nil, false)
-	tun.setMapping(1, 3000, "test.example.com")
+	tun.setMapping(1, 3000, "test.domain.com")
 	done := make(chan struct{})
 	go func() {
 		defer func() {
@@ -194,7 +194,7 @@ func TestHandleWebSocketReq_UnknownTunnel(t *testing.T) {
 
 func TestHandleWebSocketReq_DialError(t *testing.T) {
 	tun := NewTunnel("x", "", nil, nil, false)
-	tun.setMapping(1, 65535, "test.example.com")
+	tun.setMapping(1, 65535, "test.domain.com")
 	req := protocol.HTTPRequest{
 		Method:  "GET",
 		Path:    "/ws",
@@ -215,7 +215,7 @@ func TestHandleWebSocketReq_DialError(t *testing.T) {
 
 func TestHTTPRequest_HeaderFiltering(t *testing.T) {
 	tun := NewTunnel("x", "", nil, nil, false)
-	tun.setMapping(1, 3000, "test.example.com")
+	tun.setMapping(1, 3000, "test.domain.com")
 
 	req := protocol.HTTPRequest{
 		Method: "POST",

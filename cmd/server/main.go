@@ -5,10 +5,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,6 +27,7 @@ var (
 	domain   = flag.String("domain", "localhost:8080", "Base domain for tunnel URLs (e.g. tunnel.domain.com)")
 	token    = flag.String("token", "", "Required authentication token for clients (empty = no auth)")
 	verbose  = flag.String("verbose", "info", "Log level: info or debug")
+	tcpPorts = flag.String("tcp-ports", "", "Public TCP port range for raw TCP tunnels, e.g. '20000-20100' (empty = disabled)")
 	help     = flag.Bool("h", false, "Show help")
 	showVer  = flag.Bool("version", false, "Show version")
 )
@@ -52,6 +56,7 @@ Flags:
   --domain, -d  Base domain for tunnel URLs                   (default localhost:8080)
   --token, -t   Auth token for clients (empty = no auth)
   --verbose, -V Log level: info (default) or debug
+  --tcp-ports   Public TCP port range for raw TCP tunnels     (e.g. 20000-20100)
   --version, -v Show version and exit
   --help, -h    Show this help
 
@@ -61,8 +66,65 @@ Environment:
 Examples:
   vlgr-server
   vlgr-server -a :4443 -w :8080 -d tunnel.domain.com -t mysecret
-  vlgr-server --addr 127.0.0.1:4443 --http 127.0.0.1:8080 --domain tunnel.example.com -V debug
+  vlgr-server --addr 127.0.0.1:4443 --http 127.0.0.1:8080 --domain tunnel.domain.com -V debug
 `)
+}
+
+// enforceDashStyle rejects long flags written with a single dash and
+// one-letter flags written with two dashes (Go's flag package would silently
+// accept both forms).
+func enforceDashStyle() {
+	for _, arg := range os.Args[1:] {
+		if arg == "--" {
+			break // flag terminator: the rest are positional args
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			continue
+		}
+		name := strings.TrimLeft(arg, "-")
+		if i := strings.IndexByte(name, '='); i >= 0 {
+			name = name[:i]
+		}
+		if name == "" {
+			continue
+		}
+		double := strings.HasPrefix(arg, "--")
+		if len(name) > 1 && !double {
+			log.Fatalf("[server] flag -%s: long flags take two dashes (use --%s)", name, name)
+		}
+		if len(name) == 1 && double {
+			log.Fatalf("[server] flag --%s: one-letter flags take a single dash (use -%s)", name, name)
+		}
+	}
+}
+
+// hostOnly strips a trailing :port from a base domain, so TCP tunnel URLs
+// use the bare hostname the client can reach directly.
+func hostOnly(domain string) string {
+	if h, _, err := net.SplitHostPort(domain); err == nil {
+		return h
+	}
+	return domain
+}
+
+// parsePortRange parses "start-end" into inclusive bounds.
+func parsePortRange(s string) (uint16, uint16, error) {
+	parts := strings.SplitN(s, "-", 2)
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("expected format start-end, got %q", s)
+	}
+	start, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil || start < 1 || start > 65535 {
+		return 0, 0, fmt.Errorf("invalid start port %q", parts[0])
+	}
+	end, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil || end < 1 || end > 65535 {
+		return 0, 0, fmt.Errorf("invalid end port %q", parts[1])
+	}
+	if end < start {
+		return 0, 0, fmt.Errorf("end port %d is less than start port %d", end, start)
+	}
+	return uint16(start), uint16(end), nil
 }
 
 const maxConns = 1000
@@ -76,7 +138,7 @@ var upgrader = websocket.Upgrader{
 			return true
 		}
 		// Exact host match: a prefix check would pass
-		// https://host.example.com.evil.com for host.example.com.
+		// https://host.domain.com.evil.com for host.domain.com.
 		u, err := url.Parse(origin)
 		if err != nil {
 			return false
@@ -86,6 +148,7 @@ var upgrader = websocket.Upgrader{
 }
 
 func main() {
+	enforceDashStyle()
 	flag.Parse()
 
 	if *help {
@@ -107,6 +170,17 @@ func main() {
 	registry := server.NewRegistry()
 	proxy := server.NewReverseProxy(registry, baseDomain, debug)
 
+	var tcpAlloc *server.PortAllocator
+	tcpHost := hostOnly(baseDomain)
+	if *tcpPorts != "" {
+		start, end, err := parsePortRange(*tcpPorts)
+		if err != nil {
+			log.Fatalf("[server] invalid --tcp-ports: %v", err)
+		}
+		tcpAlloc = server.NewPortAllocator(start, end)
+		log.Printf("[server] raw TCP tunnels enabled on ports %d-%d (host %s)", start, end, tcpHost)
+	}
+
 	tunnelMux := http.NewServeMux()
 	tunnelMux.HandleFunc("/_tunnel", func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -123,7 +197,7 @@ func main() {
 			return
 		}
 
-		handler := server.NewClientHandler(conn, registry, baseDomain, *token, debug)
+		handler := server.NewClientHandler(conn, registry, baseDomain, *token, debug, tcpAlloc, tcpHost)
 		log.Printf("[server] new client connected")
 		handler.Run()
 	})

@@ -60,6 +60,17 @@ func (r *Registry) Get(subdomain string) *Tunnel {
 	return r.tunnels[subdomain]
 }
 
+// generateTunnelID returns a random 64-bit tunnel identifier. Used for TCP
+// tunnels, which have no subdomain but still need a unique ID for routing.
+func generateTunnelID() uint64 {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		log.Printf("[registry] CRITICAL: crypto/rand failed, using timestamp fallback: %v", err)
+		return uint64(time.Now().UnixNano())
+	}
+	return binary.BigEndian.Uint64(b)
+}
+
 func generateSubdomain() string {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {

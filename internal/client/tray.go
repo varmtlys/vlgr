@@ -9,8 +9,11 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"fyne.io/systray"
+
+	"vlgr/internal/protocol"
 )
 
 // Tray icon: a diagonal arrow with an arrowhead and tail feathers,
@@ -34,6 +37,47 @@ func trayIcon() []byte {
 	return data
 }
 
+// traySlot is one reusable menu row representing a forward. The whole pool
+// is created once at startup and only titles/visibility change afterwards,
+// so click channels stay valid for the life of the process.
+type traySlot struct {
+	item *systray.MenuItem
+	open *systray.MenuItem
+	del  *systray.MenuItem
+
+	mu     sync.Mutex
+	active bool
+	port   uint16
+	url    string
+	scheme string
+}
+
+func (s *traySlot) set(port uint16, url, scheme string) {
+	s.mu.Lock()
+	s.active = true
+	s.port = port
+	s.url = url
+	s.scheme = scheme
+	s.mu.Unlock()
+	s.item.SetTitle(fmt.Sprintf("%d → %s", port, url))
+	s.item.Show()
+}
+
+func (s *traySlot) clear() {
+	s.mu.Lock()
+	s.active = false
+	s.port = 0
+	s.url = ""
+	s.mu.Unlock()
+	s.item.Hide()
+}
+
+func (s *traySlot) snapshot() (active bool, port uint16, url, scheme string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.active, s.port, s.url, s.scheme
+}
+
 // Tray shows a system tray icon for one client instance with a menu to
 // view, add and remove port forwards.
 type Tray struct {
@@ -42,33 +86,123 @@ type Tray struct {
 
 	mu     sync.Mutex
 	tunnel *Tunnel
-	stop   chan struct{} // closed on every menu rebuild to release old click watchers
 	ready  bool
+
+	status *systray.MenuItem
+	slots  []*traySlot
+	add    *systray.MenuItem
+	quit   *systray.MenuItem
+	stopCh chan struct{} // closed once on shutdown to release click watchers
 }
 
 func NewTray(label string, onQuit func()) *Tray {
-	return &Tray{label: label, onQuit: onQuit}
+	return &Tray{label: label, onQuit: onQuit, stopCh: make(chan struct{})}
 }
 
 // Run blocks until Stop is called or Quit is chosen in the menu. It must be
 // called from the main goroutine.
 func (tr *Tray) Run() {
-	systray.Run(func() {
-		if icon := trayIcon(); icon != nil {
-			systray.SetIcon(icon)
+	systray.Run(tr.onReady, nil)
+}
+
+// onReady builds the static menu once. Click watchers are wired here and
+// live for the whole process; Refresh only updates titles and visibility.
+func (tr *Tray) onReady() {
+	if icon := trayIcon(); icon != nil {
+		systray.SetIcon(icon)
+	}
+	systray.SetTitle("vlgr")
+	systray.SetTooltip(tr.label)
+
+	title := systray.AddMenuItem(tr.label, "")
+	title.Disable()
+	systray.AddSeparator()
+
+	tr.status = systray.AddMenuItem("connecting…", "")
+	tr.status.Disable()
+
+	// Fixed pool of forward rows. Visibility is NOT touched here: on Windows
+	// the native menu items are created asynchronously after onReady returns,
+	// so calling Hide()/Show() now fails with "menu item not found". The
+	// deferred Refresh below runs once the backend has settled.
+	tr.slots = make([]*traySlot, protocol.MaxTunnelsPerClient)
+	for i := range tr.slots {
+		item := systray.AddMenuItem("", "")
+		s := &traySlot{
+			item: item,
+			open: item.AddSubMenuItem("Open in browser", ""),
+			del:  item.AddSubMenuItem("Remove forward", ""),
 		}
-		systray.SetTitle("vlgr")
-		systray.SetTooltip(tr.label)
+		tr.slots[i] = s
+		go tr.watchSlot(s)
+	}
+
+	systray.AddSeparator()
+	tr.add = systray.AddMenuItem("Add forward…", "Add a port forward")
+	tr.quit = systray.AddMenuItem("Quit", "Stop this vlgr-client instance")
+
+	go tr.watchControls()
+
+	// Defer the first Refresh until the native menu exists. A later Refresh
+	// from SetTunnel/onChange will correct the state again anyway.
+	go func() {
+		time.Sleep(300 * time.Millisecond)
 		tr.mu.Lock()
 		tr.ready = true
 		tr.mu.Unlock()
 		tr.Refresh()
-	}, nil)
+	}()
+}
+
+func (tr *Tray) watchSlot(s *traySlot) {
+	for {
+		select {
+		case <-tr.stopCh:
+			return
+		case <-s.open.ClickedCh:
+			active, _, url, scheme := s.snapshot()
+			if active && url != "" {
+				openBrowser(scheme + "://" + url)
+			}
+		case <-s.del.ClickedCh:
+			active, port, _, _ := s.snapshot()
+			t := tr.currentTunnel()
+			if active && t != nil {
+				go func() {
+					if err := t.RemovePort(port); err != nil {
+						log.Printf("[tray] remove port %d: %v", port, err)
+					}
+				}()
+			}
+		}
+	}
+}
+
+func (tr *Tray) watchControls() {
+	for {
+		select {
+		case <-tr.stopCh:
+			return
+		case <-tr.add.ClickedCh:
+			go tr.promptAdd()
+		case <-tr.quit.ClickedCh:
+			if tr.onQuit != nil {
+				tr.onQuit()
+			}
+			return
+		}
+	}
 }
 
 // Stop terminates the tray loop (Run returns).
 func (tr *Tray) Stop() {
 	systray.Quit()
+}
+
+func (tr *Tray) currentTunnel() *Tunnel {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	return tr.tunnel
 }
 
 // SetTunnel switches the tray to a (re)connected tunnel; nil marks the
@@ -80,92 +214,53 @@ func (tr *Tray) SetTunnel(t *Tunnel) {
 	tr.Refresh()
 }
 
-// Refresh rebuilds the menu from the current forwards.
+// Refresh updates the existing menu items from the current forwards. Held
+// under tr.mu so concurrent callers (tunnel change events, SetTunnel) cannot
+// interleave menu mutations.
 func (tr *Tray) Refresh() {
 	tr.mu.Lock()
+	defer tr.mu.Unlock()
 	if !tr.ready {
-		tr.mu.Unlock()
 		return
 	}
-	if tr.stop != nil {
-		close(tr.stop)
-	}
-	stop := make(chan struct{})
-	tr.stop = stop
 	t := tr.tunnel
-	tr.mu.Unlock()
-
-	systray.ResetMenu()
-
-	title := systray.AddMenuItem(tr.label, "")
-	title.Disable()
-	systray.AddSeparator()
 
 	var forwards []Forward
+	scheme := "http"
 	if t != nil {
 		forwards = t.Forwards()
-	}
-	if t == nil {
-		item := systray.AddMenuItem("disconnected…", "")
-		item.Disable()
-	} else if len(forwards) == 0 {
-		item := systray.AddMenuItem("no forwards", "")
-		item.Disable()
-	}
-
-	scheme := "http"
-	if t != nil && t.useTLS {
-		scheme = "https"
-	}
-
-	for _, f := range forwards {
-		f := f
-		item := systray.AddMenuItem(fmt.Sprintf("%d → %s", f.Port, f.URL), "")
-		open := item.AddSubMenuItem("Open in browser", "")
-		del := item.AddSubMenuItem("Remove forward", "")
-		go func() {
-			for {
-				select {
-				case <-stop:
-					return
-				case <-open.ClickedCh:
-					openBrowser(scheme + "://" + f.URL)
-				case <-del.ClickedCh:
-					if err := t.RemovePort(f.Port); err != nil {
-						log.Printf("[tray] remove port %d: %v", f.Port, err)
-					}
-				}
-			}
-		}()
-	}
-
-	systray.AddSeparator()
-	add := systray.AddMenuItem("Add forward…", "Add a port forward")
-	if t == nil {
-		add.Disable()
-	}
-	quit := systray.AddMenuItem("Quit", "Stop this vlgr-client instance")
-
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			case <-add.ClickedCh:
-				go tr.promptAdd(t)
-			case <-quit.ClickedCh:
-				if tr.onQuit != nil {
-					tr.onQuit()
-				}
-				return
-			}
+		if t.useTLS {
+			scheme = "https"
 		}
-	}()
+	}
+
+	for i, s := range tr.slots {
+		if i < len(forwards) {
+			s.set(forwards[i].Port, forwards[i].URL, scheme)
+		} else {
+			s.clear()
+		}
+	}
+
+	switch {
+	case t == nil:
+		tr.status.SetTitle("disconnected…")
+		tr.status.Show()
+		tr.add.Disable()
+	case len(forwards) == 0:
+		tr.status.SetTitle("no forwards")
+		tr.status.Show()
+		tr.add.Enable()
+	default:
+		tr.status.Hide()
+		tr.add.Enable()
+	}
 }
 
 // promptAdd asks the user for "<port> [subdomain]" via a native input box
 // and registers the forward.
-func (tr *Tray) promptAdd(t *Tunnel) {
+func (tr *Tray) promptAdd() {
+	t := tr.currentTunnel()
 	if t == nil {
 		return
 	}
