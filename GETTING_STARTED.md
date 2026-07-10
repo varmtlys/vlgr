@@ -73,8 +73,8 @@ sudo ./scripts/deploy-server.sh -d tunnel.domain.com -t mysecret --release lates
 5. Creates a dedicated system user (default: `nobody`)
 6. Sets up directories (`/opt/vlgr/bin`, `/opt/vlgr/logs`, `/etc/vlgr`)
 7. Writes config to `/etc/vlgr/vlgr-server.conf`
-8. Creates and enables a systemd service (`vlgr-server`)
-9. Optionally installs Caddy, adds Cloudflare DNS plugin, appends reverse-proxy config
+8. Optionally installs Caddy first (`--caddy`): adds the Cloudflare DNS plugin, appends reverse-proxy config, and creates a `caddy.service` unit when Caddy came from a plain binary download
+9. Creates and enables a systemd service (`vlgr-server`); when `caddy.service` exists, the unit declares `Requires=caddy.service` + `After=caddy.service`, so systemd starts Caddy together with vlgr-server and refuses to start vlgr-server if Caddy cannot start
 
 After the script finishes, the server is running and ready for clients.
 
@@ -86,6 +86,13 @@ Grab the pre-built client binary for your platform from [GitHub Releases](https:
 
 # Multiple tunnels (ports match subdomains by position):
 ./vlgr-client -s tunnel.domain.com:443 -p "8080,3000,5000" -u "api,web,admin" --tls -t <token>
+
+# With a system tray icon (Windows/Linux):
+./vlgr-client -s tunnel.domain.com:443 -p 3000 --tls -t <token> --tray
+
+# Add / remove forwards on an already running client:
+./vlgr-client --add "5000 mysub"
+./vlgr-client --del 5000
 ```
 
 > The auto-deploy script automates Steps 3–6 (server-side setup). Steps 1–2 (Cloudflare DNS & API token) and Step 7 (client connection) must be done manually. For a manual setup or to understand each component, follow the detailed guide.
@@ -299,6 +306,8 @@ Create `/etc/systemd/system/vlgr-server.service`:
 [Unit]
 Description=VLGR Tunnel Server
 After=network.target caddy.service
+# Start Caddy together with vlgr-server; refuse to start without it
+Requires=caddy.service
 
 [Service]
 Type=simple
@@ -404,6 +413,30 @@ Expected output (multiple tunnels):
 ```
 
 `-tls` is required — the client must use `wss://` because Caddy terminates TLS on port 443.
+
+### Managing forwards on a running client
+
+A running instance can be modified without restarting it:
+
+```bash
+# Add a forward (port + subdomain):
+./vlgr-client --add "5000 mysub"
+
+# Remove a forward (frees its subdomain on the server):
+./vlgr-client --del 5000
+```
+
+`--add`/`--del` must be used without any other flags. When several client
+instances run in parallel, a console menu lists each instance with its
+current forwards so you can pick the target (Ctrl+C cancels).
+
+### System tray icon
+
+On Windows and Linux, add `--tray` to show a tray icon for the instance
+(one icon per running instance). The menu lets you view the active
+forwards, open them in the browser, remove them, and add new ones via an
+input dialog (`<port> [subdomain]`; on Linux this needs `zenity` or
+`kdialog`). *Quit* stops the instance.
 
 ---
 

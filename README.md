@@ -45,6 +45,8 @@ WebSocket upgrades are fully proxied via TCP hijacking and `MsgStreamData`/`MsgS
 
 Large HTTP bodies are streamed too: bodies up to 4 MB travel inline in a single frame, anything bigger is relayed in 32 KB `MsgStreamData` chunks — so uploads/downloads have no size limit, responses are flushed as they arrive (SSE works), and memory per transfer stays bounded.
 
+Forwards can be managed at runtime: `--add`/`--del` talk to a running instance over a local control socket (with a console menu when several instances run in parallel), and `--tray` puts a per-instance icon in the system tray (Windows/Linux) for viewing, adding and removing forwards.
+
 ---
 
 ## Project Structure
@@ -73,12 +75,16 @@ vlgr/
 │   │   ├── registry.go             # Tunnel registry (subdomain → Tunnel)
 │   │   ├── registry_test.go        # 9 tests: register, get, unregister, concurrency
 │   │   ├── handler.go              # Client WebSocket handler
-│   │   ├── handler_test.go         # 41 tests: auth, registration, frame dispatch, stream relay, concurrency
+│   │   ├── handler_test.go         # 43 tests: auth, registration, unregister, frame dispatch, stream relay, concurrency
 │   │   ├── proxy.go                # Reverse proxy for incoming HTTP, streamed transfers
 │   │   └── proxy_test.go           # 5 tests: subdomain extraction, response writing, header injection
 │   ├── client/
-│   │   ├── tunnel.go               # Client logic: connect, register, proxy, streamed bodies
-│   │   └── tunnel_test.go          # 27 tests: routing, WS relay, body streams, error paths
+│   │   ├── tunnel.go               # Client logic: connect, register, proxy, streamed bodies, control socket
+│   │   ├── tunnel_test.go          # 27 tests: routing, WS relay, body streams, error paths
+│   │   ├── tray.go                 # System tray icon and menu (Windows/Linux, fyne.io/systray)
+│   │   ├── tray_stub.go            # No-op Tray for platforms without tray support (keeps darwin builds cgo-free)
+│   │   ├── tray_input_windows.go   # Native input box + browser open (Windows)
+│   │   └── tray_input_linux.go     # Input dialog via zenity/kdialog + xdg-open (Linux)
 │   └── integration/
 │       └── integration_test.go     # 24 E2E tests: live server/client/backend, streamed bodies
 │
@@ -133,6 +139,9 @@ Every message is wrapped in a fixed binary frame:
 | `0x0A` | `MsgError` | Both | Error message |
 | `0x0B` | `MsgStreamData` | Both | Stream data chunk (WebSocket relay or streamed HTTP body) |
 | `0x0C` | `MsgStreamClose` | Both | Stream close / body EOF |
+| `0x0D` | `MsgUnregister` | Client → Server | Remove one tunnel (identified by frame `TunnelID`) from a live connection |
+| `0x0E` | `MsgUnregisterOK` | Server → Client | Tunnel removed |
+| `0x0F` | `MsgUnregisterErr` | Server → Client | Unregister error (unknown tunnel) |
 
 ### Auth payload (`MsgAuth` / `MsgAuthOK`)
 
@@ -260,22 +269,36 @@ host = "abc123.tunnel.domain.com", baseDomain = "tunnel.domain.com"
 1. Dial WebSocket (`ws://` or `wss://` depending on `-tls` flag).
 2. Send `MsgAuth` with token and client version; warn if the server version differs.
 3. For each port in the comma-separated `--ports` list, send `MsgRegister` with port and optional subdomain (matched by position in `--subdomain`).
-4. Parse public URLs and tunnelIDs from responses. Store `tunnelID → port` mapping for routing.
+4. Parse public URLs and tunnelIDs from responses. Each forward (`tunnelID`, local port, public URL) is stored in an ordered `forwards` list used for routing, `LIST`/`DEL` control commands and the tray menu.
 
 **Run():**
 - Reads messages in a loop.
 - `MsgHTTPReq` → spawns `handleHTTPReq` goroutine (concurrent handling), routes to correct `localhost:<port>` by `frame.TunnelID`. A streamed request body is fed to the local app through an `io.Reader` backed by incoming `MsgStreamData` chunks; a response body over 4 MB is pumped back the same way.
 - `MsgStreamData`/`MsgStreamClose` → dispatched to the WebSocket relay, a streamed request body, or a streamed-response cancel signal.
 - `MsgCloseTunnel` → exits loop.
+- `MsgRegisterOK`/`MsgRegisterErr` and `MsgUnregisterOK`/`MsgUnregisterErr` arriving mid-session resolve a pending `AddPort`/`RemovePort` call.
+
+**Control socket:**
+Each running instance listens on `127.0.0.1:<random port>` and writes the address to `%TEMP%/vlgr-client-<pid>.ctl` (removed on shutdown). Line-based text commands:
+
+| Command | Response | Purpose |
+|---|---|---|
+| `ADD <port> [subdomain]` | `OK <url>` / `ERR <msg>` | Register a new forward on the live connection |
+| `DEL <port>` | `OK removed port <port>` / `ERR <msg>` | Unregister a forward (sends `MsgUnregister`, frees the subdomain) |
+| `LIST` | `OK <n>` + `n` lines `<port> <url>` | Enumerate active forwards |
 
 **Limits:** 100 concurrent local requests, 200 concurrent long-lived streams (WebSocket relays + streamed transfers), 20 tunnels per client, 1000 client connections per server.
 
 **Multi-tunnel routing:**
-When the client registers multiple ports, the server assigns a unique `TunnelID` to each. Incoming `MsgHTTPReq` frames carry the target `TunnelID`. The client looks up the corresponding local port via `mappings[TunnelID]` and forwards the request to the correct `localhost:<port>`.
+When the client registers multiple ports, the server assigns a unique `TunnelID` to each. Incoming `MsgHTTPReq` frames carry the target `TunnelID`. The client looks up the corresponding local port in the `forwards` list and forwards the request to the correct `localhost:<port>`.
 
 ### 2. Client entry point (`cmd/client/main.go`)
 
 Reconnection loop with exponential backoff: 1s → 2s → 4s → ... → 30s max. Resets on successful connection. Handles SIGINT/SIGTERM for graceful shutdown (the server does too).
+
+**`--add` / `--del` modes:** instead of starting a tunnel, the process discovers running instances by scanning `vlgr-client-*.ctl` files in the temp dir (stale files from dead instances are removed), then sends `ADD`/`DEL` over the control socket. With one instance the command applies directly; with several, a console menu lists each instance (pid + its current forwards from `LIST`) to choose the target — Ctrl+C cancels. These flags must be used alone: combining `--add`/`--del` with each other or any other flag is an error.
+
+**`--tray` mode:** the systray loop owns the main goroutine while the reconnect loop runs beside it. Each instance gets its own tray icon (a base64-embedded diagonal arrow — PNG on Linux, ICO on Windows). The menu shows the active forwards (each with *Open in browser* and *Remove forward*), an *Add forward…* item that opens a native input dialog (`<port> [subdomain]`), and *Quit*. The menu refreshes automatically whenever the set of forwards changes, including changes made via `--add`/`--del` from another terminal. Supported on Windows and Linux (zenity or kdialog needed for the add dialog); on macOS builds the flag exits with an error to keep cross-compilation cgo-free.
 
 ---
 
@@ -379,9 +402,16 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 | `--subdomain` | `-u` | auto | Request custom subdomain(s), comma-separated — order matches `--ports` |
 | `--tls` | | `false` | Use WSS (TLS) — required when connecting via Caddy/HTTPS |
 | `--verbose` | `-V` | `info` | Log level: `info` (default) or `debug` |
-| `--add` | | | Add a port with subdomain to running instance: `"<port> <subdomain>"` |
+| `--tray` | | `false` | Show a system tray icon for this instance (Windows/Linux) with a menu to view, add and remove forwards |
+| `--add` | | | Add a port with subdomain to a running instance: `"<port> <subdomain>"` — must be used alone |
+| `--del` | | | Remove a port forward (and its subdomain) from a running instance: `<port>` — must be used alone |
 | `--version` | `-v` | | Show version and exit |
 | `--help` | `-h` | | Show help with usage examples |
+
+`--add` and `--del` talk to an already running vlgr-client over its local
+control socket. When several instances run in parallel, a console menu lists
+each instance with its current forwards to pick the target (Ctrl+C cancels);
+with a single instance the command applies immediately.
 
 ---
 
@@ -422,8 +452,12 @@ sudo ./scripts/deploy-server.sh -d tunnel.domain.com -t my-token \
 # Client — multiple tunnels
 ./vlgr-client -s tunnel.domain.com:443 -p "8080,3000,5000" -u "api,web,admin" --tls
 
-# Add ports to running client
+# Add / remove ports on a running client
 ./vlgr-client --add "5000 mysub"
+./vlgr-client --del 5000
+
+# Client with a system tray icon (Windows/Linux)
+./vlgr-client -s tunnel.domain.com:443 -p 3000 --tls --tray
 ```
 
 ---
