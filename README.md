@@ -475,6 +475,7 @@ and can enforce them per host.
 | `--tray` | | `false` | Show a system tray icon for this instance (Windows/Linux) with a menu to view, add and remove forwards |
 | `--inspect` | | | Traffic inspector dashboard address, e.g. `127.0.0.1:4040` (empty = disabled) |
 | `--inspect-limit` | | `1000` | Max rows kept in the inspector (older dropped, new on top); capped at `100000` |
+| `--autoupdate` | | `false` | Poll GitHub releases and self-update in the background |
 | `--add` | | | Add a port with subdomain to a running instance: `"<port> <subdomain>"` — must be used alone |
 | `--del` | | | Remove a port forward (and its subdomain) from a running instance: `<port>` — must be used alone |
 | `--version` | `-v` | | Show version and exit |
@@ -526,6 +527,15 @@ etc.; the text dump is a plain human-readable request/response log. Both are
 also available directly at `/api/export.har` and `/api/export.txt`.
 
 The dashboard is bound locally and never exposed through the tunnel.
+
+### Self-update
+
+With `--autoupdate` the client polls the GitHub releases API hourly and, when a
+newer tag ships, downloads the matching binary for its OS/arch, swaps it on
+disk and relaunches itself with the same arguments. Development builds
+(`version = dev`) are skipped. The relaunch drops the tunnel briefly; the new
+process reconnects on its own, so an open forward recovers within the usual
+reconnect backoff. Disabled by default.
 
 ---
 

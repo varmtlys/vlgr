@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"vlgr/internal/client"
+	"vlgr/internal/selfupdate"
 	"vlgr/internal/version"
 )
 
@@ -33,6 +35,7 @@ var (
 	useTray      = flag.Bool("tray", false, "Show a system tray icon for this instance")
 	inspect      = flag.String("inspect", "", "Enable the traffic inspector dashboard on this address (e.g. 127.0.0.1:4040)")
 	inspectLimit = flag.Int("inspect-limit", 1000, "Max rows kept in the inspector (older dropped); capped at 100000")
+	autoUpdate   = flag.Bool("autoupdate", false, "Check for newer releases and self-update in the background")
 	help         = flag.Bool("h", false, "Show help")
 	showVer      = flag.Bool("version", false, "Show version")
 )
@@ -69,6 +72,7 @@ Flags:
   --tray          Show a system tray icon for this instance
   --inspect       Traffic inspector dashboard address (e.g. 127.0.0.1:4040)
   --inspect-limit Max rows kept in the inspector (default 1000, max 100000)
+  --autoupdate    Self-update from GitHub releases in the background (default false)
   --add           Add a port with subdomain to a running instance (e.g. "5000 mysub")
   --del           Remove a port forward from a running instance   (e.g. 5000)
   --version, -v   Show version and exit
@@ -465,6 +469,23 @@ func main() {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+
+	if *autoUpdate {
+		go selfupdate.Run(context.Background(), selfupdate.Config{
+			Repo:    "varmtlys/vlgr",
+			Asset:   "vlgr-client",
+			Current: version.Version,
+			Every:   time.Hour,
+			// Free the inspector port (if any) before the replacement starts;
+			// the reconnect loop drops the tunnel on exit and the new process
+			// reconnects on its own.
+			BeforeRestart: func() {
+				if dash != nil {
+					dash.Stop()
+				}
+			},
+		})
+	}
 
 	if *useTray {
 		// systray must own the main goroutine; the tunnel loop runs beside
