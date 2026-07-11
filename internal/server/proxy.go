@@ -190,7 +190,7 @@ func (p *ReverseProxy) serveWebSocket(w http.ResponseWriter, tunnel *Tunnel, req
 	}
 	streamData := make(chan []byte, protocol.StreamRelayBuf)
 
-	requestID, resp, cleanup, err := tunnel.Handler.ForwardWebSocket(tunnel.ID, req, streamData)
+	requestID, resp, cleanup, err := tunnel.Handler.forward(tunnel.ID, req, streamData)
 	if err != nil {
 		log.Printf("[proxy] forward error for %s: %v", subdomain, err)
 		http.Error(w, "tunnel error", http.StatusBadGateway)

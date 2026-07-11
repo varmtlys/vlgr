@@ -59,9 +59,10 @@ sudo ./scripts/deploy-server.sh -d tunnel.domain.com -t mysecret --release lates
 | `--caddy` | Install & configure Caddy with Cloudflare DNS plugin |
 | `--cf-token <t>` | Cloudflare API token (requires `--caddy`) |
 | `--no-service` | Skip systemd service creation |
-| `--no-build` | Force source build (skip release download) |
+| `--no-build` | Skip the Go build — use a pre-built binary from the local `build/` directory |
 | `--release <v>` | Download from GitHub release: `latest` (default) or `v1.0` |
 | `--ref <ref>` | Git ref for source build (default: `main`) |
+| `--src-sha256 <h>` | Verify the cloned source tree matches this sha256 (optional) |
 | `-u, --uninstall` | Remove VLGR server, service, binary and config |
 
 ### What it does
@@ -393,9 +394,9 @@ Expected output (single tunnel):
 
 ```
 [client] authenticated
-[client] tunnel ready: a3f8b2c1.tunnel.domain.com -> localhost:3000
+[client] tunnel ready: a3f8b2c1d4e5f6a7.tunnel.domain.com -> localhost:3000
 ========================================
-  Tunnels: a3f8b2c1.tunnel.domain.com
+  Tunnels: a3f8b2c1d4e5f6a7.tunnel.domain.com
   Local:   3000
 ========================================
 ```
@@ -474,7 +475,7 @@ exposed through the tunnel.
 From any device on the internet:
 
 ```bash
-curl https://a3f8b2c1.tunnel.domain.com/
+curl https://a3f8b2c1d4e5f6a7.tunnel.domain.com/
 # Returns your localhost:3000 content
 ```
 

@@ -540,18 +540,6 @@ func (h *ClientHandler) handleStreamClose(frame protocol.Frame) {
 	pr.closeStream()
 }
 
-// ForwardHTTP relays a regular HTTP request and returns the response.
-func (h *ClientHandler) ForwardHTTP(tunnelID uint64, req protocol.HTTPRequest) (protocol.HTTPResponse, error) {
-	_, resp, _, err := h.forward(tunnelID, req, nil)
-	return resp, err
-}
-
-// ForwardWebSocket relays an upgrade request; the caller must invoke cleanup
-// when the relay ends (it keeps the pending entry alive for stream frames).
-func (h *ClientHandler) ForwardWebSocket(tunnelID uint64, req protocol.HTTPRequest, streamData chan []byte) (requestID uint64, resp protocol.HTTPResponse, cleanup func(), err error) {
-	return h.forward(tunnelID, req, streamData)
-}
-
 // startForward registers a pending request and sends the MsgHTTPReq frame.
 // The caller must eventually call finishForward (directly or via the cleanup
 // func returned by forward).
@@ -611,6 +599,9 @@ func (h *ClientHandler) finishForward(requestID uint64, pr *pendingReq) {
 	pr.closeDone()
 }
 
+// forward relays a request and returns the response. With a non-nil
+// streamData (WebSocket upgrade) the caller must invoke cleanup when the
+// relay ends — it keeps the pending entry alive for stream frames.
 func (h *ClientHandler) forward(tunnelID uint64, req protocol.HTTPRequest, streamData chan []byte) (requestID uint64, resp protocol.HTTPResponse, cleanup func(), err error) {
 	requestID, pr, err := h.startForward(tunnelID, req, streamData)
 	if err != nil {

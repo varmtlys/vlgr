@@ -512,31 +512,30 @@ func (t *Tunnel) handleControlConn(conn net.Conn) {
 		parts := strings.Fields(line)
 		switch parts[0] {
 		case "ADD", "DEL":
-			if len(parts) < 2 {
-				fmt.Fprintf(conn, "ERR bad command\n")
-				continue
+			port := 0
+			if len(parts) >= 2 {
+				port, _ = strconv.Atoi(parts[1])
 			}
-			port, err := strconv.Atoi(parts[1])
-			if err != nil || port < 1 || port > 65535 {
+			if port < 1 || port > 65535 {
 				fmt.Fprintf(conn, "ERR invalid port\n")
 				continue
 			}
+			var err error
+			ok := ""
 			if parts[0] == "ADD" {
 				subdomain := ""
 				if len(parts) > 2 {
 					subdomain = parts[2]
 				}
-				if url, err := t.AddPort(uint16(port), subdomain); err != nil {
-					fmt.Fprintf(conn, "ERR %v\n", err)
-				} else {
-					fmt.Fprintf(conn, "OK %s\n", url)
-				}
-				continue
+				ok, err = t.AddPort(uint16(port), subdomain)
+			} else {
+				err = t.RemovePort(uint16(port))
+				ok = fmt.Sprintf("removed port %d", port)
 			}
-			if err := t.RemovePort(uint16(port)); err != nil {
+			if err != nil {
 				fmt.Fprintf(conn, "ERR %v\n", err)
 			} else {
-				fmt.Fprintf(conn, "OK removed port %d\n", port)
+				fmt.Fprintf(conn, "OK %s\n", ok)
 			}
 		case "LIST":
 			// Response: "OK <n>" followed by n lines "<port> <url>".
@@ -721,17 +720,6 @@ func (t *Tunnel) portFor(tunnelID uint64) (uint16, bool) {
 	return 0, false
 }
 
-// lookupPort resolves the local port for a tunnel, reporting 502 to the
-// server when the tunnel is unknown.
-func (t *Tunnel) lookupPort(tunnelID, requestID uint64) (uint16, bool) {
-	port, ok := t.portFor(tunnelID)
-	if !ok {
-		log.Printf("[client] unknown tunnel ID %d", tunnelID)
-		t.sendHTTPError(tunnelID, requestID, 502, fmt.Sprintf("unknown tunnel %d", tunnelID))
-	}
-	return port, ok
-}
-
 func copyHeaders(dst *http.Request, src map[string][]string) {
 	for k, values := range src {
 		switch k {
@@ -780,8 +768,10 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 }
 
 func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HTTPRequest) {
-	localPort, ok := t.lookupPort(tunnelID, requestID)
+	localPort, ok := t.portFor(tunnelID)
 	if !ok {
+		log.Printf("[client] unknown tunnel ID %d", tunnelID)
+		t.sendHTTPError(tunnelID, requestID, 502, fmt.Sprintf("unknown tunnel %d", tunnelID))
 		return
 	}
 	log.Printf("[client] proxying %s %s -> localhost:%d (body: %d bytes)", req.Method, req.Path, localPort, len(req.Body))
@@ -949,8 +939,10 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 		return
 	}
 
-	localPort, ok := t.lookupPort(tunnelID, requestID)
+	localPort, ok := t.portFor(tunnelID)
 	if !ok {
+		log.Printf("[client] unknown tunnel ID %d", tunnelID)
+		t.sendHTTPError(tunnelID, requestID, 502, fmt.Sprintf("unknown tunnel %d", tunnelID))
 		return
 	}
 	log.Printf("[client] WebSocket upgrade: %s %s -> localhost:%d (%d bytes headers payload)", req.Method, req.Path, localPort, len(req.Headers))

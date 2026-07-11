@@ -62,7 +62,7 @@ vlgr/
 │   ├── server/main.go              # Server entry point
 │   └── client/
 │       ├── main.go                 # Client entry point
-│       └── main_test.go            # 1 test with 26 address validation cases
+│       └── main_test.go            # 1 test with 18 address validation cases
 │
 ├── internal/
 │   ├── protocol/
@@ -395,7 +395,7 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 10. **Client serializes response** — `EncodeHTTPResponse(...)`
 11. **Client sends response** — `MsgHTTPRes` with same `RequestID: 42`
 12. **Server receives response** — `handleHTTPRes` routes to pending request channel
-13. **Proxy wakes up** — `ForwardHTTP` returns `HTTPResponse`
+13. **Proxy wakes up** — `awaitResponse` returns `HTTPResponse`
 14. **Proxy writes to external user** — HTTP 200 + JSON body
 15. **External user gets response** — `{"status": "ok", "uptime": 12345}`
 

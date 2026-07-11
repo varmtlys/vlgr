@@ -104,10 +104,6 @@ type instance struct {
 func discoverInstances() []instance {
 	pattern := filepath.Join(os.TempDir(), "vlgr-client-*.ctl")
 	files, _ := filepath.Glob(pattern)
-	// Legacy name used by older versions.
-	if legacy := filepath.Join(os.TempDir(), "vlgr-client.ctl"); fileExists(legacy) {
-		files = append(files, legacy)
-	}
 
 	var out []instance
 	for _, f := range files {
@@ -129,11 +125,6 @@ func discoverInstances() []instance {
 		out = append(out, instance{pid: pid, addr: addr, ctlFile: f, forwards: forwards})
 	}
 	return out
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 // queryForwards runs LIST against a control socket.
