@@ -213,6 +213,21 @@ hostnames therefore share one public port, and certificates stay entirely on
 the local service. Like raw TCP, this port bypasses Caddy and must be reachable
 directly.
 
+### Agentless SSH tunnels
+
+The relay can also expose local services to users who have no vlgr client at
+all — just a stock `ssh`. With `--ssh :2222` (and `--ssh-ports` for the public
+range) the server runs an SSH endpoint that accepts standard remote forwarding:
+
+```bash
+ssh -N -R 0:localhost:3000 tunnel.domain.com -p 2222
+```
+
+The server allocates a public TCP port, prints it back (per the `tcpip-forward`
+reply), and relays every connection to the user's local port over the SSH
+`forwarded-tcpip` channel. When the server has `--token` set it is required as
+the SSH password. `--ssh-hostkey <path>` persists the host key across restarts.
+
 ### Keep-alive
 
 WebSocket control frames (Ping/Pong) are used. Server pings every 30s. Client responds automatically via gorilla/websocket. If no Pong within 60s, the connection times out.

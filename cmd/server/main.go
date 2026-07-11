@@ -18,22 +18,26 @@ import (
 	"github.com/gorilla/websocket"
 
 	"vlgr/internal/server"
+	"vlgr/internal/sshtun"
 	"vlgr/internal/version"
 )
 
 var (
-	wsAddr   = flag.String("addr", ":4443", "WebSocket listen address for tunnel clients")
-	httpAddr = flag.String("http", ":8080", "HTTP listen address for public traffic")
-	domain   = flag.String("domain", "localhost:8080", "Base domain for tunnel URLs (e.g. tunnel.domain.com)")
-	token    = flag.String("token", "", "Required authentication token for clients (empty = no auth)")
-	verbose  = flag.String("verbose", "info", "Log level: info or debug")
-	tcpPorts  = flag.String("tcp-ports", "", "Public TCP port range for raw TCP tunnels, e.g. '20000-20100' (empty = disabled)")
-	basicAuth = flag.String("basic-auth", "", "Protect all tunnels with HTTP Basic auth, 'user:pass' (empty = off)")
-	allowIPs  = flag.String("allow-ips", "", "Comma-separated IP/CIDR allowlist for public traffic (empty = allow all)")
-	adminAddr = flag.String("admin", "", "REST API + dashboard listen address, e.g. 127.0.0.1:4041 (empty = disabled)")
-	tlsPass   = flag.String("tls-passthrough", "", "Public TLS-passthrough (SNI) listen address, e.g. :443 (empty = disabled)")
-	help      = flag.Bool("h", false, "Show help")
-	showVer   = flag.Bool("version", false, "Show version")
+	wsAddr     = flag.String("addr", ":4443", "WebSocket listen address for tunnel clients")
+	httpAddr   = flag.String("http", ":8080", "HTTP listen address for public traffic")
+	domain     = flag.String("domain", "localhost:8080", "Base domain for tunnel URLs (e.g. tunnel.domain.com)")
+	token      = flag.String("token", "", "Required authentication token for clients (empty = no auth)")
+	verbose    = flag.String("verbose", "info", "Log level: info or debug")
+	tcpPorts   = flag.String("tcp-ports", "", "Public TCP port range for raw TCP tunnels, e.g. '20000-20100' (empty = disabled)")
+	basicAuth  = flag.String("basic-auth", "", "Protect all tunnels with HTTP Basic auth, 'user:pass' (empty = off)")
+	allowIPs   = flag.String("allow-ips", "", "Comma-separated IP/CIDR allowlist for public traffic (empty = allow all)")
+	adminAddr  = flag.String("admin", "", "REST API + dashboard listen address, e.g. 127.0.0.1:4041 (empty = disabled)")
+	tlsPass    = flag.String("tls-passthrough", "", "Public TLS-passthrough (SNI) listen address, e.g. :443 (empty = disabled)")
+	sshAddr    = flag.String("ssh", "", "Agentless SSH tunnel listen address, e.g. :2222 (empty = disabled)")
+	sshPorts   = flag.String("ssh-ports", "", "Public TCP port range for SSH remote forwards, e.g. '20200-20300'")
+	sshHostKey = flag.String("ssh-hostkey", "", "Path to persist the SSH host key (empty = ephemeral per start)")
+	help       = flag.Bool("h", false, "Show help")
+	showVer    = flag.Bool("version", false, "Show version")
 )
 
 func init() {
@@ -65,6 +69,9 @@ Flags:
   --allow-ips   IP/CIDR allowlist for public traffic          (comma-separated)
   --admin       REST API + dashboard address                  (e.g. 127.0.0.1:4041)
   --tls-passthrough  Public TLS-passthrough (SNI) address     (e.g. :443)
+  --ssh         Agentless SSH tunnel listen address           (e.g. :2222)
+  --ssh-ports   Public TCP port range for SSH remote forwards (e.g. 20200-20300)
+  --ssh-hostkey Path to persist the SSH host key              (empty = ephemeral)
   --version, -v Show version and exit
   --help, -h    Show this help
 
@@ -178,6 +185,24 @@ func main() {
 		if err := tp.Start(); err != nil {
 			log.Fatalf("[server] TLS passthrough failed to start on %s: %v", *tlsPass, err)
 		}
+	}
+
+	if *sshAddr != "" {
+		if *sshPorts == "" {
+			log.Fatal("[server] --ssh requires --ssh-ports (public port range for remote forwards)")
+		}
+		start, end, err := parsePortRange(*sshPorts)
+		if err != nil {
+			log.Fatalf("[server] invalid --ssh-ports: %v", err)
+		}
+		sshServer, err := sshtun.New(*sshAddr, *token, *sshHostKey, server.NewPortAllocator(start, end))
+		if err != nil {
+			log.Fatalf("[server] SSH tunnel setup failed: %v", err)
+		}
+		if err := sshServer.Start(); err != nil {
+			log.Fatalf("[server] SSH tunnel failed to start on %s: %v", *sshAddr, err)
+		}
+		log.Printf("[server] agentless SSH forwards use public ports %d-%d", start, end)
 	}
 
 	tunnelMux := http.NewServeMux()
