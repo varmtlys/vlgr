@@ -30,6 +30,7 @@ var (
 	tcpPorts  = flag.String("tcp-ports", "", "Public TCP port range for raw TCP tunnels, e.g. '20000-20100' (empty = disabled)")
 	basicAuth = flag.String("basic-auth", "", "Protect all tunnels with HTTP Basic auth, 'user:pass' (empty = off)")
 	allowIPs  = flag.String("allow-ips", "", "Comma-separated IP/CIDR allowlist for public traffic (empty = allow all)")
+	adminAddr = flag.String("admin", "", "REST API + dashboard listen address, e.g. 127.0.0.1:4041 (empty = disabled)")
 	help      = flag.Bool("h", false, "Show help")
 	showVer   = flag.Bool("version", false, "Show version")
 )
@@ -61,6 +62,7 @@ Flags:
   --tcp-ports   Public TCP port range for raw TCP tunnels     (e.g. 20000-20100)
   --basic-auth  Protect all tunnels with HTTP Basic auth      (user:pass)
   --allow-ips   IP/CIDR allowlist for public traffic          (comma-separated)
+  --admin       REST API + dashboard address                  (e.g. 127.0.0.1:4041)
   --version, -v Show version and exit
   --help, -h    Show this help
 
@@ -158,6 +160,13 @@ func main() {
 		}
 		tcpAlloc = server.NewPortAllocator(start, end)
 		log.Printf("[server] raw TCP tunnels enabled on ports %d-%d (host %s)", start, end, tcpHost)
+	}
+
+	if *adminAddr != "" {
+		admin := server.NewAdminServer(*adminAddr, *token, registry)
+		if err := admin.Start(); err != nil {
+			log.Fatalf("[server] admin API failed to start on %s: %v", *adminAddr, err)
+		}
 	}
 
 	tunnelMux := http.NewServeMux()

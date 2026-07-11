@@ -415,8 +415,15 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 | `--tcp-ports` | | | Public TCP port range for raw TCP tunnels, e.g. `20000-20100` (empty = disabled) |
 | `--basic-auth` | | | Protect all tunnels with HTTP Basic auth, `user:pass` (empty = off) |
 | `--allow-ips` | | | Comma-separated IP/CIDR allowlist for public traffic (empty = allow all) |
+| `--admin` | | | REST API + dashboard listen address, e.g. `127.0.0.1:4041` (empty = disabled) |
 | `--version` | `-v` | | Show version and exit |
 | `--help` | `-h` | | Show help with usage examples |
+
+**Admin API + dashboard.** `--admin <addr>` starts a read-only REST API and a
+status page. `GET /api/status` returns version, uptime and tunnel count;
+`GET /api/tunnels` lists the active HTTP tunnels; `/` serves a small live
+dashboard. Bind it to loopback; when the server has `--token` set, the same
+token guards the admin endpoints as a `Bearer` token.
 
 **Endpoint protection.** `--basic-auth` and `--allow-ips` guard every public
 request before it is forwarded into a tunnel. The IP allowlist is checked
