@@ -98,12 +98,21 @@ type TCPForward struct {
 	RemotePort uint16
 }
 
+// TLSForward requests a TLS-passthrough tunnel: expose a local TLS port,
+// routed publicly by SNI. Subdomain is the requested SNI label, or empty for
+// an auto-assigned one.
+type TLSForward struct {
+	LocalPort uint16
+	Subdomain string
+}
+
 type Tunnel struct {
 	serverAddr  string
 	token       string
 	ports       []uint16
 	subdomains  []string
 	tcpForwards []TCPForward
+	tlsForwards []TLSForward
 	useTLS      bool
 	debug       bool
 
@@ -170,6 +179,12 @@ func (t *Tunnel) SetDebug(debug bool) {
 // be called before Connect.
 func (t *Tunnel) SetTCPForwards(forwards []TCPForward) {
 	t.tcpForwards = forwards
+}
+
+// SetTLSForwards configures TLS-passthrough tunnels registered during Connect.
+// Must be called before Connect.
+func (t *Tunnel) SetTLSForwards(forwards []TLSForward) {
+	t.tlsForwards = forwards
 }
 
 // SetDashboard attaches an inspector that records HTTP exchanges.
@@ -258,6 +273,19 @@ func (t *Tunnel) Connect() error {
 		}
 		t.setMapping(tunnelID, tf.LocalPort, "tcp://"+publicURL)
 		log.Printf("[client] TCP tunnel ready: tcp://%s -> localhost:%d", publicURL, tf.LocalPort)
+	}
+
+	for _, tf := range t.tlsForwards {
+		payload, err := protocol.EncodeRegister(tf.LocalPort, tf.Subdomain)
+		if err != nil {
+			return fmt.Errorf("encode tls register for port %d: %w", tf.LocalPort, err)
+		}
+		publicURL, tunnelID, err := t.registerOne(protocol.MsgRegisterTLS, payload, fmt.Sprintf("tls register for port %d", tf.LocalPort))
+		if err != nil {
+			return err
+		}
+		t.setMapping(tunnelID, tf.LocalPort, "tls://"+publicURL)
+		log.Printf("[client] TLS tunnel ready: tls://%s -> localhost:%d", publicURL, tf.LocalPort)
 	}
 
 	return nil

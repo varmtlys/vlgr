@@ -149,6 +149,7 @@ Every message is wrapped in a fixed binary frame:
 | `0x0F` | `MsgUnregisterErr` | Server → Client | Unregister error (unknown tunnel) |
 | `0x10` | `MsgRegisterTCP` | Client → Server | Register a raw TCP tunnel (local port + requested public port) |
 | `0x11` | `MsgTCPOpen` | Both | Server → Client: new public TCP connection to relay. Client → Server: local connection is up (readiness ack) |
+| `0x12` | `MsgRegisterTLS` | Client → Server | Register a TLS-passthrough tunnel (local port + optional subdomain), routed publicly by SNI |
 
 ### Auth payload (`MsgAuth` / `MsgAuthOK`)
 
@@ -199,6 +200,18 @@ as a readiness ack so the server doesn't forward bytes before the relay is
 wired up. Data then flows both ways as `MsgStreamData` frames terminated by
 `MsgStreamClose` — the same relay machinery as WebSocket upgrades. Raw TCP
 bypasses Caddy, so its ports must be reachable directly on the server.
+
+### TLS passthrough (SNI)
+
+The client can expose a local TLS service without the relay terminating TLS
+(`MsgRegisterTLS`, same payload as `MsgRegister`). The server runs a single
+public TLS listener (`--tls-passthrough`) that peeks the ClientHello, reads the
+`server_name` (SNI), maps it to a registered TLS tunnel by subdomain, and
+relays the raw bytes — including the peeked ClientHello — to the client's local
+port over the same `MsgTCPOpen`/`MsgStreamData` machinery as raw TCP. Many TLS
+hostnames therefore share one public port, and certificates stay entirely on
+the local service. Like raw TCP, this port bypasses Caddy and must be reachable
+directly.
 
 ### Keep-alive
 
@@ -439,6 +452,7 @@ and can enforce them per host.
 | `--server` | `-s` | `localhost:4443` | VLGR server address |
 | `--ports` | `-p` | | Local port(s) to expose over HTTP, comma-separated (e.g. `3000` or `8080,3000`) |
 | `--tcp` | | | Local port(s) to expose as raw TCP, comma-separated: `<local[:remote]>` (e.g. `22` or `22:2222,5432`) |
+| `--tls-tunnel` | | | Local TLS port(s) to expose via SNI passthrough: `<local[:subdomain]>` (e.g. `8443` or `8443:mysub`) |
 | `--token` | `-t` | `""` | Authentication token (required when server has `--token` set) |
 | `--subdomain` | `-u` | auto | Request custom subdomain(s), comma-separated — order matches `--ports` |
 | `--tls` | | `false` | Use WSS (TLS) — required when connecting via Caddy/HTTPS |

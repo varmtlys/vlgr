@@ -127,6 +127,7 @@ func startVLGRServer(t *testing.T, baseDomain string, token string) *testVLGRSer
 	tcpAlloc := server.NewPortAllocator(tcpStart, tcpEnd)
 
 	registry := server.NewRegistry()
+	tlsRegistry := server.NewRegistry()
 	proxy := server.NewReverseProxy(registry, baseDomain, false, nil)
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
@@ -136,7 +137,7 @@ func startVLGRServer(t *testing.T, baseDomain string, token string) *testVLGRSer
 		if err != nil {
 			return
 		}
-		handler := server.NewClientHandler(conn, registry, baseDomain, token, false, tcpAlloc, "127.0.0.1")
+		handler := server.NewClientHandler(conn, registry, baseDomain, token, false, tcpAlloc, "127.0.0.1", tlsRegistry)
 		handler.Run()
 	})
 	httpMux := http.NewServeMux()

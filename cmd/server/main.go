@@ -31,6 +31,7 @@ var (
 	basicAuth = flag.String("basic-auth", "", "Protect all tunnels with HTTP Basic auth, 'user:pass' (empty = off)")
 	allowIPs  = flag.String("allow-ips", "", "Comma-separated IP/CIDR allowlist for public traffic (empty = allow all)")
 	adminAddr = flag.String("admin", "", "REST API + dashboard listen address, e.g. 127.0.0.1:4041 (empty = disabled)")
+	tlsPass   = flag.String("tls-passthrough", "", "Public TLS-passthrough (SNI) listen address, e.g. :443 (empty = disabled)")
 	help      = flag.Bool("h", false, "Show help")
 	showVer   = flag.Bool("version", false, "Show version")
 )
@@ -63,6 +64,7 @@ Flags:
   --basic-auth  Protect all tunnels with HTTP Basic auth      (user:pass)
   --allow-ips   IP/CIDR allowlist for public traffic          (comma-separated)
   --admin       REST API + dashboard address                  (e.g. 127.0.0.1:4041)
+  --tls-passthrough  Public TLS-passthrough (SNI) address     (e.g. :443)
   --version, -v Show version and exit
   --help, -h    Show this help
 
@@ -169,6 +171,15 @@ func main() {
 		}
 	}
 
+	var tlsRegistry *server.Registry
+	if *tlsPass != "" {
+		tlsRegistry = server.NewRegistry()
+		tp := server.NewTLSPassthrough(*tlsPass, baseDomain, tlsRegistry)
+		if err := tp.Start(); err != nil {
+			log.Fatalf("[server] TLS passthrough failed to start on %s: %v", *tlsPass, err)
+		}
+	}
+
 	tunnelMux := http.NewServeMux()
 	tunnelMux.HandleFunc("/_tunnel", func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -185,7 +196,7 @@ func main() {
 			return
 		}
 
-		handler := server.NewClientHandler(conn, registry, baseDomain, *token, debug, tcpAlloc, tcpHost)
+		handler := server.NewClientHandler(conn, registry, baseDomain, *token, debug, tcpAlloc, tcpHost, tlsRegistry)
 		log.Printf("[server] new client connected")
 		handler.Run()
 	})

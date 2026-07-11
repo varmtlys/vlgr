@@ -23,6 +23,7 @@ var (
 	serverAddr   = flag.String("server", "localhost:4443", "Tunnel server address")
 	localPorts   = flag.String("ports", "", "Local ports to expose, comma-separated (e.g. '8080,3000')")
 	tcpForward   = flag.String("tcp", "", "Expose local ports as raw TCP tunnels, comma-separated (e.g. '22' or '22:2222,5432')")
+	tlsForward   = flag.String("tls-tunnel", "", "Expose local TLS ports via SNI passthrough, comma-separated (e.g. '8443' or '8443:mysub')")
 	token        = flag.String("token", "", "Authentication token")
 	subdomains   = flag.String("subdomain", "", "Request custom subdomains, comma-separated (order matches -ports)")
 	useTLS       = flag.Bool("tls", false, "Use WSS (TLS) — required when connecting via Caddy/HTTPS")
@@ -60,6 +61,7 @@ Flags:
   --server, -s    VLGR server address                            (default localhost:4443)
   --ports, -p     Local port(s) to expose over HTTP, comma-separated
   --tcp           Local port(s) to expose as raw TCP, comma-separated (e.g. "22" or "22:2222")
+  --tls-tunnel    Local TLS port(s) to expose via SNI passthrough (e.g. "8443" or "8443:mysub")
   --token, -t     Authentication token                            (default empty)
   --subdomain, -u Request custom subdomain(s), comma-separated    (default auto)
   --tls           Use WSS (TLS) — required via Caddy/HTTPS        (default false)
@@ -345,6 +347,24 @@ func parseTCPForwards(s string) ([]client.TCPForward, error) {
 	return out, nil
 }
 
+// parseTLSForwards parses "local[:subdomain],..." into TLS-passthrough specs.
+func parseTLSForwards(s string) ([]client.TLSForward, error) {
+	var out []client.TLSForward
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		localStr, subdomain, _ := strings.Cut(part, ":")
+		local, err := strconv.Atoi(strings.TrimSpace(localStr))
+		if err != nil || local <= 0 || local > 65535 {
+			return nil, fmt.Errorf("invalid local port in %q", part)
+		}
+		out = append(out, client.TLSForward{LocalPort: uint16(local), Subdomain: strings.TrimSpace(subdomain)})
+	}
+	return out, nil
+}
+
 var serverAddrRe = regexp.MustCompile(`^[A-Za-z0-9._-]+:[0-9]{1,5}$`)
 
 func validateServerAddr(s string) error {
@@ -391,8 +411,8 @@ func main() {
 		log.Fatalf("[client] %v", err)
 	}
 
-	if *localPorts == "" && *tcpForward == "" {
-		log.Fatal("please specify --ports <port[,...]> and/or --tcp <port[,...]>")
+	if *localPorts == "" && *tcpForward == "" && *tlsForward == "" {
+		log.Fatal("please specify --ports <port[,...]>, --tcp <port[,...]> and/or --tls-tunnel <port[,...]>")
 	}
 
 	var ports []uint16
@@ -410,6 +430,15 @@ func main() {
 		tcpForwards, err = parseTCPForwards(*tcpForward)
 		if err != nil || len(tcpForwards) == 0 {
 			log.Fatalf("invalid --tcp value %q: %v", *tcpForward, err)
+		}
+	}
+
+	var tlsForwards []client.TLSForward
+	if *tlsForward != "" {
+		var err error
+		tlsForwards, err = parseTLSForwards(*tlsForward)
+		if err != nil || len(tlsForwards) == 0 {
+			log.Fatalf("invalid --tls-tunnel value %q: %v", *tlsForward, err)
 		}
 	}
 
@@ -447,18 +476,18 @@ func main() {
 			}
 		})
 		go func() {
-			runLoop(ports, subs, tcpForwards, sigCh, tray, dash)
+			runLoop(ports, subs, tcpForwards, tlsForwards, sigCh, tray, dash)
 			tray.Stop()
 		}()
 		tray.Run()
 		return
 	}
 
-	runLoop(ports, subs, tcpForwards, sigCh, nil, dash)
+	runLoop(ports, subs, tcpForwards, tlsForwards, sigCh, nil, dash)
 }
 
 // runLoop is the connect/reconnect loop of a foreground client instance.
-func runLoop(ports []uint16, subs []string, tcpForwards []client.TCPForward, sigCh chan os.Signal, tray *client.Tray, dash *client.Dashboard) {
+func runLoop(ports []uint16, subs []string, tcpForwards []client.TCPForward, tlsForwards []client.TLSForward, sigCh chan os.Signal, tray *client.Tray, dash *client.Dashboard) {
 	backoff := 1 * time.Second
 	const maxBackoff = 30 * time.Second
 
@@ -471,6 +500,7 @@ func runLoop(ports []uint16, subs []string, tcpForwards []client.TCPForward, sig
 
 		tunnel = client.NewTunnel(*serverAddr, *token, ports, subs, *useTLS)
 		tunnel.SetTCPForwards(tcpForwards)
+		tunnel.SetTLSForwards(tlsForwards)
 		tunnel.SetDebug(*verbose == "debug")
 		if dash != nil {
 			tunnel.SetDashboard(dash)

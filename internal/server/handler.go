@@ -73,6 +73,11 @@ type ClientHandler struct {
 	tcpHost    string
 	tcpTunnels map[uint64]*tcpTunnel
 
+	// TLS passthrough tunnels, routed by SNI on a shared public port. nil
+	// registry = TLS passthrough disabled on this server.
+	tlsRegistry *Registry
+	tlsTunnels  map[uint64]*Tunnel
+
 	pending      map[uint64]*pendingReq
 	mu           sync.Mutex
 	writeMu      sync.Mutex
@@ -82,7 +87,7 @@ type ClientHandler struct {
 	closeOnce sync.Once
 }
 
-func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain string, expectedToken string, debug bool, tcpAlloc *PortAllocator, tcpHost string) *ClientHandler {
+func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain string, expectedToken string, debug bool, tcpAlloc *PortAllocator, tcpHost string, tlsRegistry *Registry) *ClientHandler {
 	h := &ClientHandler{
 		conn:          conn,
 		registry:      registry,
@@ -93,6 +98,8 @@ func NewClientHandler(conn *websocket.Conn, registry *Registry, baseDomain strin
 		tcpAlloc:      tcpAlloc,
 		tcpHost:       tcpHost,
 		tcpTunnels:    make(map[uint64]*tcpTunnel),
+		tlsRegistry:   tlsRegistry,
+		tlsTunnels:    make(map[uint64]*Tunnel),
 		pending:       make(map[uint64]*pendingReq),
 		done:          make(chan struct{}),
 	}
@@ -179,6 +186,8 @@ func (h *ClientHandler) handleFrame(frame protocol.Frame) {
 		h.handleUnregister(frame)
 	case protocol.MsgRegisterTCP:
 		h.handleRegisterTCP(frame)
+	case protocol.MsgRegisterTLS:
+		h.handleRegisterTLS(frame)
 	case protocol.MsgTCPOpen:
 		h.handleTCPReady(frame)
 	case protocol.MsgHTTPRes:
@@ -303,6 +312,55 @@ func (h *ClientHandler) handleUnregister(frame protocol.Frame) {
 	log.Printf("[handler] tunnel %s unregistered by client", tunnel.Subdomain)
 }
 
+func (h *ClientHandler) handleRegisterTLS(frame protocol.Frame) {
+	localPort, requestedSubdomain, err := protocol.DecodeRegister(frame.Payload)
+	if err != nil {
+		h.registerErr(err.Error())
+		return
+	}
+	if localPort == 0 {
+		h.registerErr("invalid port: 0")
+		return
+	}
+	if h.tlsRegistry == nil {
+		h.registerErr("tls passthrough not enabled on this server")
+		return
+	}
+	if !validSubdomain(requestedSubdomain) {
+		h.registerErr("invalid subdomain characters")
+		return
+	}
+	if requestedSubdomain == "" {
+		requestedSubdomain = generateSubdomain()
+	}
+
+	publicURL := fmt.Sprintf("%s.%s", requestedSubdomain, h.baseDomain)
+	if len(publicURL) > 255 {
+		h.registerErr("public URL too long")
+		return
+	}
+
+	h.mu.Lock()
+	if h.tunnelCount >= protocol.MaxTunnelsPerClient {
+		h.mu.Unlock()
+		h.registerErr(fmt.Sprintf("too many tunnels: max %d per client", protocol.MaxTunnelsPerClient))
+		return
+	}
+	tunnel, err := h.tlsRegistry.Register(requestedSubdomain, h)
+	if err != nil {
+		h.mu.Unlock()
+		h.registerErr(err.Error())
+		return
+	}
+	h.tlsTunnels[tunnel.ID] = tunnel
+	h.tunnelCount++
+	h.mu.Unlock()
+
+	respPayload, _ := protocol.EncodeRegisterOK(publicURL, tunnel.ID)
+	h.writeMessage(protocol.MsgRegisterOK, tunnel.ID, 0, respPayload)
+	log.Printf("[handler] TLS tunnel registered: %s (SNI) -> localhost:%d", publicURL, localPort)
+}
+
 func (h *ClientHandler) handleRegisterTCP(frame protocol.Frame) {
 	localPort, remotePort, err := protocol.DecodeRegisterTCP(frame.Payload)
 	if err != nil {
@@ -381,11 +439,15 @@ func (h *ClientHandler) acceptTCP(tt *tcpTunnel) {
 		if err != nil {
 			return // listener closed on cleanup
 		}
-		go h.handleTCPConn(tt, conn)
+		go h.relayPublicConn(tt.id, conn, nil)
 	}
 }
 
-func (h *ClientHandler) handleTCPConn(tt *tcpTunnel, conn net.Conn) {
+// relayPublicConn relays one public connection to the tunnel's local port on
+// the client. prefix, when non-nil, holds bytes already read from conn (e.g. a
+// peeked TLS ClientHello) that must reach the client before the live stream.
+// Shared by raw TCP tunnels and TLS-passthrough (SNI) routing.
+func (h *ClientHandler) relayPublicConn(tunnelID uint64, conn net.Conn, prefix []byte) {
 	defer conn.Close()
 
 	requestID := h.nextRequestID()
@@ -403,7 +465,7 @@ func (h *ClientHandler) handleTCPConn(tt *tcpTunnel, conn net.Conn) {
 	}()
 
 	// Ask the client to open a matching local connection.
-	if err := h.writeMessage(protocol.MsgTCPOpen, tt.id, requestID, nil); err != nil {
+	if err := h.writeMessage(protocol.MsgTCPOpen, tunnelID, requestID, nil); err != nil {
 		return
 	}
 
@@ -415,6 +477,13 @@ func (h *ClientHandler) handleTCPConn(tt *tcpTunnel, conn net.Conn) {
 		return
 	case <-h.done:
 		return
+	}
+
+	// Forward any bytes already consumed while peeking (SNI passthrough).
+	if len(prefix) > 0 {
+		if err := h.SendStreamData(requestID, prefix); err != nil {
+			return
+		}
 	}
 
 	// client → public: drain stream data onto the public connection.
@@ -665,6 +734,11 @@ func (h *ClientHandler) cleanup() {
 		for _, tt := range h.tcpTunnels {
 			h.closeTCPTunnel(tt)
 			log.Printf("[handler] TCP tunnel :%d closed", tt.publicPort)
+		}
+
+		for _, tunnel := range h.tlsTunnels {
+			h.tlsRegistry.Unregister(tunnel.Subdomain)
+			log.Printf("[handler] TLS tunnel %s unregistered", tunnel.Subdomain)
 		}
 
 		h.mu.Lock()

@@ -41,6 +41,12 @@ const (
 	// WebSocket upgrades.
 	MsgRegisterTCP byte = 0x10
 	MsgTCPOpen     byte = 0x11
+	// TLS passthrough: the client registers a local TLS port with
+	// MsgRegisterTLS (same payload as MsgRegister — port + optional
+	// subdomain). The server routes public TLS connections to it by the SNI
+	// hostname in the ClientHello, relaying raw bytes without terminating
+	// TLS, over the same MsgTCPOpen/MsgStreamData machinery as raw TCP.
+	MsgRegisterTLS byte = 0x12
 
 	HeaderSize  = 21
 	MaxBodySize = 32 << 20
