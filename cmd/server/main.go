@@ -27,9 +27,11 @@ var (
 	domain   = flag.String("domain", "localhost:8080", "Base domain for tunnel URLs (e.g. tunnel.domain.com)")
 	token    = flag.String("token", "", "Required authentication token for clients (empty = no auth)")
 	verbose  = flag.String("verbose", "info", "Log level: info or debug")
-	tcpPorts = flag.String("tcp-ports", "", "Public TCP port range for raw TCP tunnels, e.g. '20000-20100' (empty = disabled)")
-	help     = flag.Bool("h", false, "Show help")
-	showVer  = flag.Bool("version", false, "Show version")
+	tcpPorts  = flag.String("tcp-ports", "", "Public TCP port range for raw TCP tunnels, e.g. '20000-20100' (empty = disabled)")
+	basicAuth = flag.String("basic-auth", "", "Protect all tunnels with HTTP Basic auth, 'user:pass' (empty = off)")
+	allowIPs  = flag.String("allow-ips", "", "Comma-separated IP/CIDR allowlist for public traffic (empty = allow all)")
+	help      = flag.Bool("h", false, "Show help")
+	showVer   = flag.Bool("version", false, "Show version")
 )
 
 func init() {
@@ -57,6 +59,8 @@ Flags:
   --token, -t   Auth token for clients (empty = no auth)
   --verbose, -V Log level: info (default) or debug
   --tcp-ports   Public TCP port range for raw TCP tunnels     (e.g. 20000-20100)
+  --basic-auth  Protect all tunnels with HTTP Basic auth      (user:pass)
+  --allow-ips   IP/CIDR allowlist for public traffic          (comma-separated)
   --version, -v Show version and exit
   --help, -h    Show this help
 
@@ -139,7 +143,11 @@ func main() {
 	debug := *verbose == "debug"
 	baseDomain := *domain
 	registry := server.NewRegistry()
-	proxy := server.NewReverseProxy(registry, baseDomain, debug)
+	protect, err := server.NewProtector(*basicAuth, *allowIPs)
+	if err != nil {
+		log.Fatalf("[server] %v", err)
+	}
+	proxy := server.NewReverseProxy(registry, baseDomain, debug, protect)
 
 	var tcpAlloc *server.PortAllocator
 	tcpHost := hostOnly(baseDomain)

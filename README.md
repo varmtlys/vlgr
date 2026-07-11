@@ -413,8 +413,17 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 | `--token` | `-t` | `""` | Auth token for clients (empty = no auth, or set `VLGR_TOKEN` env) |
 | `--verbose` | `-V` | `info` | Log level: `info` (default) or `debug` |
 | `--tcp-ports` | | | Public TCP port range for raw TCP tunnels, e.g. `20000-20100` (empty = disabled) |
+| `--basic-auth` | | | Protect all tunnels with HTTP Basic auth, `user:pass` (empty = off) |
+| `--allow-ips` | | | Comma-separated IP/CIDR allowlist for public traffic (empty = allow all) |
 | `--version` | `-v` | | Show version and exit |
 | `--help` | `-h` | | Show help with usage examples |
+
+**Endpoint protection.** `--basic-auth` and `--allow-ips` guard every public
+request before it is forwarded into a tunnel. The IP allowlist is checked
+against the originating client IP (leftmost `X-Forwarded-For`, set by Caddy).
+Both are enforced server-wide. TLS client certificates (mTLS) and OAuth are
+intentionally left to the fronting proxy (Caddy), which already terminates TLS
+and can enforce them per host.
 
 ### Client (`cmd/client`)
 
