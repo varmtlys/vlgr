@@ -17,6 +17,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"vlgr/internal/selfupdate"
 	"vlgr/internal/server"
 	"vlgr/internal/sshtun"
 	"vlgr/internal/version"
@@ -36,6 +37,7 @@ var (
 	sshAddr    = flag.String("ssh", "", "Agentless SSH tunnel listen address, e.g. :2222 (empty = disabled)")
 	sshPorts   = flag.String("ssh-ports", "", "Public TCP port range for SSH remote forwards, e.g. '20200-20300'")
 	sshHostKey = flag.String("ssh-hostkey", "", "Path to persist the SSH host key (empty = ephemeral per start)")
+	autoUpdate = flag.Bool("autoupdate", false, "Check for newer releases and self-update in the background")
 	help       = flag.Bool("h", false, "Show help")
 	showVer    = flag.Bool("version", false, "Show version")
 )
@@ -72,6 +74,7 @@ Flags:
   --ssh         Agentless SSH tunnel listen address           (e.g. :2222)
   --ssh-ports   Public TCP port range for SSH remote forwards (e.g. 20200-20300)
   --ssh-hostkey Path to persist the SSH host key              (empty = ephemeral)
+  --autoupdate  Self-update from GitHub releases in the background (default false)
   --version, -v Show version and exit
   --help, -h    Show this help
 
@@ -160,6 +163,10 @@ func main() {
 	}
 	proxy := server.NewReverseProxy(registry, baseDomain, debug, protect)
 
+	// Listeners to close before a self-update relaunch, so the replacement can
+	// bind the same ports.
+	var updateClosers []func()
+
 	var tcpAlloc *server.PortAllocator
 	tcpHost := hostOnly(baseDomain)
 	if *tcpPorts != "" {
@@ -176,6 +183,7 @@ func main() {
 		if err := admin.Start(); err != nil {
 			log.Fatalf("[server] admin API failed to start on %s: %v", *adminAddr, err)
 		}
+		updateClosers = append(updateClosers, admin.Stop)
 	}
 
 	var tlsRegistry *server.Registry
@@ -185,6 +193,7 @@ func main() {
 		if err := tp.Start(); err != nil {
 			log.Fatalf("[server] TLS passthrough failed to start on %s: %v", *tlsPass, err)
 		}
+		updateClosers = append(updateClosers, tp.Stop)
 	}
 
 	if *sshAddr != "" {
@@ -202,6 +211,7 @@ func main() {
 		if err := sshServer.Start(); err != nil {
 			log.Fatalf("[server] SSH tunnel failed to start on %s: %v", *sshAddr, err)
 		}
+		updateClosers = append(updateClosers, sshServer.Stop)
 		log.Printf("[server] agentless SSH forwards use public ports %d-%d", start, end)
 	}
 
@@ -235,6 +245,24 @@ func main() {
 		Addr:              *wsAddr,
 		Handler:           tunnelMux,
 		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	if *autoUpdate {
+		go selfupdate.Run(context.Background(), selfupdate.Config{
+			Repo:    "varmtlys/vlgr",
+			Asset:   "vlgr-server",
+			Current: version.Version,
+			Every:   time.Hour,
+			// Close every listener so the replacement can bind the same ports;
+			// connected clients reconnect once it is up.
+			BeforeRestart: func() {
+				publicSrv.Close()
+				tunnelSrv.Close()
+				for _, stop := range updateClosers {
+					stop()
+				}
+			},
+		})
 	}
 
 	sigCh := make(chan os.Signal, 1)

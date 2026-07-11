@@ -444,8 +444,19 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 | `--basic-auth` | | | Protect all tunnels with HTTP Basic auth, `user:pass` (empty = off) |
 | `--allow-ips` | | | Comma-separated IP/CIDR allowlist for public traffic (empty = allow all) |
 | `--admin` | | | REST API + dashboard listen address, e.g. `127.0.0.1:4041` (empty = disabled) |
+| `--tls-passthrough` | | | Public TLS-passthrough (SNI) listen address, e.g. `:443` (empty = disabled) |
+| `--ssh` | | | Agentless SSH tunnel listen address, e.g. `:2222` (empty = disabled) |
+| `--ssh-ports` | | | Public TCP port range for SSH remote forwards, e.g. `20200-20300` |
+| `--ssh-hostkey` | | | Path to persist the SSH host key (empty = ephemeral per start) |
+| `--autoupdate` | | `false` | Poll GitHub releases and self-update in the background |
 | `--version` | `-v` | | Show version and exit |
 | `--help` | `-h` | | Show help with usage examples |
+
+**Self-update.** With `--autoupdate` the server polls GitHub releases hourly
+and, on a newer tag, downloads the matching binary, swaps it on disk and
+relaunches. Before relaunching it closes every listener so the replacement can
+bind the same ports; hijacked client tunnels drop and reconnect on their own.
+Development builds are skipped. Disabled by default.
 
 **Admin API + dashboard.** `--admin <addr>` starts a read-only REST API and a
 status page. `GET /api/status` returns version, uptime and tunnel count;
