@@ -32,6 +32,7 @@ var (
 	tcpPorts   = flag.String("tcp-ports", "", "Public TCP port range for raw TCP tunnels, e.g. '20000-20100' (empty = disabled)")
 	basicAuth  = flag.String("basic-auth", "", "Protect all tunnels with HTTP Basic auth, 'user:pass' (empty = off)")
 	allowIPs   = flag.String("allow-ips", "", "Comma-separated IP/CIDR allowlist for public traffic (empty = allow all)")
+	trustHops  = flag.Int("trusted-proxy-hops", 0, "Number of trusted reverse proxies in front (1 behind Caddy); 0 = use direct peer IP")
 	adminAddr  = flag.String("admin", "", "REST API + dashboard listen address, e.g. 127.0.0.1:4041 (empty = disabled)")
 	tlsPass    = flag.String("tls-passthrough", "", "Public TLS-passthrough (SNI) listen address, e.g. :443 (empty = disabled)")
 	sshAddr    = flag.String("ssh", "", "Agentless SSH tunnel listen address, e.g. :2222 (empty = disabled)")
@@ -69,6 +70,7 @@ Flags:
   --tcp-ports   Public TCP port range for raw TCP tunnels     (e.g. 20000-20100)
   --basic-auth  Protect all tunnels with HTTP Basic auth      (user:pass)
   --allow-ips   IP/CIDR allowlist for public traffic          (comma-separated)
+  --trusted-proxy-hops  Trusted reverse proxies in front (1 behind Caddy; default 0)
   --admin       REST API + dashboard address                  (e.g. 127.0.0.1:4041)
   --tls-passthrough  Public TLS-passthrough (SNI) address     (e.g. :443)
   --ssh         Agentless SSH tunnel listen address           (e.g. :2222)
@@ -157,7 +159,7 @@ func main() {
 	debug := *verbose == "debug"
 	baseDomain := *domain
 	registry := server.NewRegistry()
-	protect, err := server.NewProtector(*basicAuth, *allowIPs)
+	protect, err := server.NewProtector(*basicAuth, *allowIPs, *trustHops)
 	if err != nil {
 		log.Fatalf("[server] %v", err)
 	}

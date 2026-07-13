@@ -20,12 +20,22 @@ type Protector struct {
 
 	// IP allowlist: nil/empty allows every source.
 	allow []*net.IPNet
+
+	// trustedHops is the number of trusted reverse proxies in front of the
+	// server (e.g. 1 for Caddy). 0 means the client IP is taken from the
+	// direct connection (RemoteAddr) and X-Forwarded-For is ignored, so it
+	// cannot be spoofed.
+	trustedHops int
 }
 
-// NewProtector builds a Protector from "user:pass" (empty = no basic auth) and
-// a comma-separated CIDR/IP allowlist (empty = allow all).
-func NewProtector(basicAuth, allowIPs string) (*Protector, error) {
-	p := &Protector{}
+// NewProtector builds a Protector from "user:pass" (empty = no basic auth), a
+// comma-separated CIDR/IP allowlist (empty = allow all) and the number of
+// trusted proxy hops for resolving the client IP.
+func NewProtector(basicAuth, allowIPs string, trustedHops int) (*Protector, error) {
+	if trustedHops < 0 {
+		return nil, fmt.Errorf("trusted proxy hops must be >= 0")
+	}
+	p := &Protector{trustedHops: trustedHops}
 	if basicAuth != "" {
 		user, pass, ok := strings.Cut(basicAuth, ":")
 		if !ok || user == "" {
@@ -70,7 +80,7 @@ func (p *Protector) Allow(w http.ResponseWriter, r *http.Request, subdomain stri
 		return true
 	}
 	if len(p.allow) > 0 && !p.ipAllowed(r) {
-		log.Printf("[protect] %s: source %s not in allowlist", subdomain, clientIP(r))
+		log.Printf("[protect] %s: source %s not in allowlist", subdomain, p.clientIP(r))
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return false
 	}
@@ -94,7 +104,7 @@ func (p *Protector) basicAuthOK(r *http.Request) bool {
 }
 
 func (p *Protector) ipAllowed(r *http.Request) bool {
-	ip := net.ParseIP(clientIP(r))
+	ip := net.ParseIP(p.clientIP(r))
 	if ip == nil {
 		return false
 	}
@@ -106,13 +116,37 @@ func (p *Protector) ipAllowed(r *http.Request) bool {
 	return false
 }
 
-// clientIP returns the originating client IP: the leftmost X-Forwarded-For
-// entry when present (set by Caddy), else the RemoteAddr host.
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		first, _, _ := strings.Cut(xff, ",")
-		return strings.TrimSpace(first)
+// clientIP resolves the originating client IP for allowlisting.
+//
+// With trustedHops == 0 it uses the direct peer (RemoteAddr) and ignores
+// X-Forwarded-For entirely — a client cannot spoof its own source IP.
+//
+// With trustedHops == N (N trusted proxies in front) it takes the N-th entry
+// from the right of X-Forwarded-For: each trusted proxy appends the address it
+// saw, so the N-th from the end is the address the outermost trusted proxy
+// observed. Any attacker-supplied entries sit further left and are ignored.
+func (p *Protector) clientIP(r *http.Request) string {
+	if p.trustedHops <= 0 {
+		return remoteHost(r)
 	}
+	var xff []string
+	for _, h := range r.Header["X-Forwarded-For"] {
+		for _, part := range strings.Split(h, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				xff = append(xff, part)
+			}
+		}
+	}
+	idx := len(xff) - p.trustedHops
+	if idx < 0 || idx >= len(xff) {
+		// Fewer forwarded entries than expected hops: fall back to the direct
+		// peer rather than trusting an attacker-controlled leftmost value.
+		return remoteHost(r)
+	}
+	return xff[idx]
+}
+
+func remoteHost(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

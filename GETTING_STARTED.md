@@ -318,6 +318,9 @@ WorkingDirectory=/opt/vlgr
 EnvironmentFile=/etc/vlgr/vlgr-server.conf
 # Token is NOT passed as a flag (visible in /proc/PID/cmdline) —
 # the server reads VLGR_TOKEN from the environment (EnvironmentFile above).
+# Append optional flags as needed, e.g. --trusted-proxy-hops 1 (behind Caddy),
+# --basic-auth / --allow-ips, --admin 127.0.0.1:4041, --tls-passthrough,
+# --ssh / --ssh-ports, --autoupdate.
 ExecStart=/opt/vlgr/vlgr-server --addr ${VLGR_WS_ADDR} --http ${VLGR_HTTP_ADDR} --domain ${VLGR_DOMAIN}
 Restart=always
 RestartSec=5
@@ -468,6 +471,74 @@ format read by browser DevTools, Charles, Fiddler, Postman…) or as a plain
 human-readable **text** dump. The dashboard is bound locally and is never
 exposed through the tunnel.
 
+### Endpoint protection (server)
+
+`--basic-auth user:pass` and `--allow-ips <cidr,...>` guard every public
+request before it enters a tunnel. Because the server sits behind Caddy, set
+`--trusted-proxy-hops 1` so the IP allowlist reads the address Caddy appended
+to `X-Forwarded-For` rather than a client-supplied value:
+
+```bash
+./vlgr-server --domain tunnel.domain.com \
+    --basic-auth ops:s3cret --allow-ips 10.0.0.0/8,203.0.113.4 --trusted-proxy-hops 1
+```
+
+The default `--trusted-proxy-hops 0` uses the direct peer IP and ignores
+`X-Forwarded-For` entirely — safe when nothing is proxying in front. mTLS and
+OAuth are intentionally left to Caddy, which terminates TLS.
+
+### Admin API + dashboard (server)
+
+`--admin 127.0.0.1:4041` exposes a read-only REST API (`/api/status`,
+`/api/tunnels`) and a small live status page. Bind it to loopback; when the
+server has a token, the same token guards the admin endpoints as a `Bearer`
+token. Reach it over an SSH tunnel or a protected Caddy vhost — do not expose
+it publicly.
+
+### TLS-passthrough tunnels (SNI)
+
+To expose a local **TLS** service without the relay terminating TLS, run a
+public SNI listener on the server and register the local port from the client:
+
+```bash
+# Server: one public TLS port multiplexed by SNI (bypasses Caddy — open it on the firewall)
+./vlgr-server --domain tunnel.domain.com --tls-passthrough :8443
+
+# Client: expose local TLS on 8443 (optionally request a subdomain)
+./vlgr-client -s tunnel.domain.com:443 --tls --tls-tunnel 8443:mysub
+```
+
+Certificates stay entirely on the local service; the server routes by the SNI
+hostname and relays raw bytes.
+
+### Agentless SSH tunnels (`ssh -R`)
+
+Users without a vlgr client can expose a local service with stock `ssh`. Enable
+an SSH endpoint and a public port range on the server:
+
+```bash
+# Server (open --ssh and the port range on the firewall)
+./vlgr-server --domain tunnel.domain.com --ssh :2222 --ssh-ports 20200-20300 \
+    --ssh-hostkey /etc/vlgr/ssh_host_ed25519
+
+# User (no vlgr client): forward local :3000 to an auto-assigned public port
+ssh -N -R 0:localhost:3000 tunnel.domain.com -p 2222
+```
+
+When the server has a token it is required as the SSH password.
+`--ssh-hostkey <path>` persists the host key so clients don't see key-changed
+warnings across restarts.
+
+### Signed self-update
+
+`--autoupdate` (server and client, default off) polls GitHub releases hourly
+and, on a newer tag, downloads the matching binary, **verifies its detached
+ed25519 signature**, then swaps it on disk and relaunches. This only works with
+binaries built with a signing key (see the [signed releases](#signed-releases)
+section); an unsigned build refuses to update (fail-safe). Development builds
+are skipped. On relaunch listeners are closed so the replacement can rebind the
+same ports; connected clients reconnect on their own.
+
 ---
 
 ## Step 8: End-to-End Test
@@ -478,6 +549,39 @@ From any device on the internet:
 curl https://a3f8b2c1d4e5f6a7.tunnel.domain.com/
 # Returns your localhost:3000 content
 ```
+
+---
+
+## Signed releases
+
+`--autoupdate` only installs binaries whose detached ed25519 signature verifies
+against a public key compiled into the binary. To produce such binaries you
+sign at build time.
+
+Generate a signing key once and keep the private seed secret (e.g. a CI
+secret — never commit it):
+
+```powershell
+go run .\scripts\sign genkey
+# private (seed, keep secret): <64 hex chars>   → store as $VLGR_SIGNING_KEY
+# public  (compile in):        <64 hex chars>   → embedded automatically
+```
+
+Build with the key set. `build.ps1` derives the public key, compiles it into
+every binary via `-ldflags "-X vlgr/internal/selfupdate.SigningPublicKey=..."`,
+and writes a `<binary>.sig` next to each artifact:
+
+```powershell
+$env:VLGR_SIGNING_KEY = "<private-seed-hex>"
+.\scripts\build.ps1
+```
+
+Upload both the binary and its `.sig` to the GitHub release. The updater fetches
+`<asset>` and `<asset>.sig`, verifies the signature, and only then installs.
+Without a key, `build.ps1` produces unsigned binaries and self-update refuses to
+run — this is intentional (fail-safe). Keep the private seed stable across
+releases: changing it breaks auto-update for already-deployed nodes, which then
+need a manual reinstall.
 
 ---
 
