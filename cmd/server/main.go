@@ -17,19 +17,30 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"vlgr/internal/selfupdate"
 	"vlgr/internal/server"
+	"vlgr/internal/sshtun"
 	"vlgr/internal/version"
 )
 
 var (
-	wsAddr   = flag.String("addr", ":4443", "WebSocket listen address for tunnel clients")
-	httpAddr = flag.String("http", ":8080", "HTTP listen address for public traffic")
-	domain   = flag.String("domain", "localhost:8080", "Base domain for tunnel URLs (e.g. tunnel.domain.com)")
-	token    = flag.String("token", "", "Required authentication token for clients (empty = no auth)")
-	verbose  = flag.String("verbose", "info", "Log level: info or debug")
-	tcpPorts = flag.String("tcp-ports", "", "Public TCP port range for raw TCP tunnels, e.g. '20000-20100' (empty = disabled)")
-	help     = flag.Bool("h", false, "Show help")
-	showVer  = flag.Bool("version", false, "Show version")
+	wsAddr     = flag.String("addr", ":4443", "WebSocket listen address for tunnel clients")
+	httpAddr   = flag.String("http", ":8080", "HTTP listen address for public traffic")
+	domain     = flag.String("domain", "localhost:8080", "Base domain for tunnel URLs (e.g. tunnel.domain.com)")
+	token      = flag.String("token", "", "Required authentication token for clients (empty = no auth)")
+	verbose    = flag.String("verbose", "info", "Log level: info or debug")
+	tcpPorts   = flag.String("tcp-ports", "", "Public TCP port range for raw TCP tunnels, e.g. '20000-20100' (empty = disabled)")
+	basicAuth  = flag.String("basic-auth", "", "Protect all tunnels with HTTP Basic auth, 'user:pass' (empty = off)")
+	allowIPs   = flag.String("allow-ips", "", "Comma-separated IP/CIDR allowlist for public traffic (empty = allow all)")
+	trustHops  = flag.Int("trusted-proxy-hops", 0, "Number of trusted reverse proxies in front (1 behind Caddy); 0 = use direct peer IP")
+	adminAddr  = flag.String("admin", "", "REST API + dashboard listen address, e.g. 127.0.0.1:4041 (empty = disabled)")
+	tlsPass    = flag.String("tls-passthrough", "", "Public TLS-passthrough (SNI) listen address, e.g. :443 (empty = disabled)")
+	sshAddr    = flag.String("ssh", "", "Agentless SSH tunnel listen address, e.g. :2222 (empty = disabled)")
+	sshPorts   = flag.String("ssh-ports", "", "Public TCP port range for SSH remote forwards, e.g. '20200-20300'")
+	sshHostKey = flag.String("ssh-hostkey", "", "Path to persist the SSH host key (empty = ephemeral per start)")
+	autoUpdate = flag.Bool("autoupdate", false, "Check for newer releases and self-update in the background")
+	help       = flag.Bool("h", false, "Show help")
+	showVer    = flag.Bool("version", false, "Show version")
 )
 
 func init() {
@@ -57,6 +68,15 @@ Flags:
   --token, -t   Auth token for clients (empty = no auth)
   --verbose, -V Log level: info (default) or debug
   --tcp-ports   Public TCP port range for raw TCP tunnels     (e.g. 20000-20100)
+  --basic-auth  Protect all tunnels with HTTP Basic auth      (user:pass)
+  --allow-ips   IP/CIDR allowlist for public traffic          (comma-separated)
+  --trusted-proxy-hops  Trusted reverse proxies in front (1 behind Caddy; default 0)
+  --admin       REST API + dashboard address                  (e.g. 127.0.0.1:4041)
+  --tls-passthrough  Public TLS-passthrough (SNI) address     (e.g. :443)
+  --ssh         Agentless SSH tunnel listen address           (e.g. :2222)
+  --ssh-ports   Public TCP port range for SSH remote forwards (e.g. 20200-20300)
+  --ssh-hostkey Path to persist the SSH host key              (empty = ephemeral)
+  --autoupdate  Self-update from GitHub releases in the background (default false)
   --version, -v Show version and exit
   --help, -h    Show this help
 
@@ -68,34 +88,6 @@ Examples:
   vlgr-server -a :4443 -w :8080 -d tunnel.domain.com -t mysecret
   vlgr-server --addr 127.0.0.1:4443 --http 127.0.0.1:8080 --domain tunnel.domain.com -V debug
 `)
-}
-
-// enforceDashStyle rejects long flags written with a single dash and
-// one-letter flags written with two dashes (Go's flag package would silently
-// accept both forms).
-func enforceDashStyle() {
-	for _, arg := range os.Args[1:] {
-		if arg == "--" {
-			break // flag terminator: the rest are positional args
-		}
-		if !strings.HasPrefix(arg, "-") || arg == "-" {
-			continue
-		}
-		name := strings.TrimLeft(arg, "-")
-		if i := strings.IndexByte(name, '='); i >= 0 {
-			name = name[:i]
-		}
-		if name == "" {
-			continue
-		}
-		double := strings.HasPrefix(arg, "--")
-		if len(name) > 1 && !double {
-			log.Fatalf("[server] flag -%s: long flags take two dashes (use --%s)", name, name)
-		}
-		if len(name) == 1 && double {
-			log.Fatalf("[server] flag --%s: one-letter flags take a single dash (use -%s)", name, name)
-		}
-	}
 }
 
 // hostOnly strips a trailing :port from a base domain, so TCP tunnel URLs
@@ -148,7 +140,6 @@ var upgrader = websocket.Upgrader{
 }
 
 func main() {
-	enforceDashStyle()
 	flag.Parse()
 
 	if *help {
@@ -168,7 +159,15 @@ func main() {
 	debug := *verbose == "debug"
 	baseDomain := *domain
 	registry := server.NewRegistry()
-	proxy := server.NewReverseProxy(registry, baseDomain, debug)
+	protect, err := server.NewProtector(*basicAuth, *allowIPs, *trustHops)
+	if err != nil {
+		log.Fatalf("[server] %v", err)
+	}
+	proxy := server.NewReverseProxy(registry, baseDomain, debug, protect)
+
+	// Listeners to close before a self-update relaunch, so the replacement can
+	// bind the same ports.
+	var updateClosers []func()
 
 	var tcpAlloc *server.PortAllocator
 	tcpHost := hostOnly(baseDomain)
@@ -179,6 +178,43 @@ func main() {
 		}
 		tcpAlloc = server.NewPortAllocator(start, end)
 		log.Printf("[server] raw TCP tunnels enabled on ports %d-%d (host %s)", start, end, tcpHost)
+	}
+
+	if *adminAddr != "" {
+		admin := server.NewAdminServer(*adminAddr, *token, registry)
+		if err := admin.Start(); err != nil {
+			log.Fatalf("[server] admin API failed to start on %s: %v", *adminAddr, err)
+		}
+		updateClosers = append(updateClosers, admin.Stop)
+	}
+
+	var tlsRegistry *server.Registry
+	if *tlsPass != "" {
+		tlsRegistry = server.NewRegistry()
+		tp := server.NewTLSPassthrough(*tlsPass, baseDomain, tlsRegistry)
+		if err := tp.Start(); err != nil {
+			log.Fatalf("[server] TLS passthrough failed to start on %s: %v", *tlsPass, err)
+		}
+		updateClosers = append(updateClosers, tp.Stop)
+	}
+
+	if *sshAddr != "" {
+		if *sshPorts == "" {
+			log.Fatal("[server] --ssh requires --ssh-ports (public port range for remote forwards)")
+		}
+		start, end, err := parsePortRange(*sshPorts)
+		if err != nil {
+			log.Fatalf("[server] invalid --ssh-ports: %v", err)
+		}
+		sshServer, err := sshtun.New(*sshAddr, *token, *sshHostKey, server.NewPortAllocator(start, end))
+		if err != nil {
+			log.Fatalf("[server] SSH tunnel setup failed: %v", err)
+		}
+		if err := sshServer.Start(); err != nil {
+			log.Fatalf("[server] SSH tunnel failed to start on %s: %v", *sshAddr, err)
+		}
+		updateClosers = append(updateClosers, sshServer.Stop)
+		log.Printf("[server] agentless SSH forwards use public ports %d-%d", start, end)
 	}
 
 	tunnelMux := http.NewServeMux()
@@ -197,7 +233,7 @@ func main() {
 			return
 		}
 
-		handler := server.NewClientHandler(conn, registry, baseDomain, *token, debug, tcpAlloc, tcpHost)
+		handler := server.NewClientHandler(conn, registry, baseDomain, *token, debug, tcpAlloc, tcpHost, tlsRegistry)
 		log.Printf("[server] new client connected")
 		handler.Run()
 	})
@@ -211,6 +247,24 @@ func main() {
 		Addr:              *wsAddr,
 		Handler:           tunnelMux,
 		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	if *autoUpdate {
+		go selfupdate.Run(context.Background(), selfupdate.Config{
+			Repo:    "varmtlys/vlgr",
+			Asset:   "vlgr-server",
+			Current: version.Version,
+			Every:   time.Hour,
+			// Close every listener so the replacement can bind the same ports;
+			// connected clients reconnect once it is up.
+			BeforeRestart: func() {
+				publicSrv.Close()
+				tunnelSrv.Close()
+				for _, stop := range updateClosers {
+					stop()
+				}
+			},
+		})
 	}
 
 	sigCh := make(chan os.Signal, 1)

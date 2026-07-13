@@ -98,12 +98,21 @@ type TCPForward struct {
 	RemotePort uint16
 }
 
+// TLSForward requests a TLS-passthrough tunnel: expose a local TLS port,
+// routed publicly by SNI. Subdomain is the requested SNI label, or empty for
+// an auto-assigned one.
+type TLSForward struct {
+	LocalPort uint16
+	Subdomain string
+}
+
 type Tunnel struct {
 	serverAddr  string
 	token       string
 	ports       []uint16
 	subdomains  []string
 	tcpForwards []TCPForward
+	tlsForwards []TLSForward
 	useTLS      bool
 	debug       bool
 
@@ -170,6 +179,12 @@ func (t *Tunnel) SetDebug(debug bool) {
 // be called before Connect.
 func (t *Tunnel) SetTCPForwards(forwards []TCPForward) {
 	t.tcpForwards = forwards
+}
+
+// SetTLSForwards configures TLS-passthrough tunnels registered during Connect.
+// Must be called before Connect.
+func (t *Tunnel) SetTLSForwards(forwards []TLSForward) {
+	t.tlsForwards = forwards
 }
 
 // SetDashboard attaches an inspector that records HTTP exchanges.
@@ -258,6 +273,19 @@ func (t *Tunnel) Connect() error {
 		}
 		t.setMapping(tunnelID, tf.LocalPort, "tcp://"+publicURL)
 		log.Printf("[client] TCP tunnel ready: tcp://%s -> localhost:%d", publicURL, tf.LocalPort)
+	}
+
+	for _, tf := range t.tlsForwards {
+		payload, err := protocol.EncodeRegister(tf.LocalPort, tf.Subdomain)
+		if err != nil {
+			return fmt.Errorf("encode tls register for port %d: %w", tf.LocalPort, err)
+		}
+		publicURL, tunnelID, err := t.registerOne(protocol.MsgRegisterTLS, payload, fmt.Sprintf("tls register for port %d", tf.LocalPort))
+		if err != nil {
+			return err
+		}
+		t.setMapping(tunnelID, tf.LocalPort, "tls://"+publicURL)
+		log.Printf("[client] TLS tunnel ready: tls://%s -> localhost:%d", publicURL, tf.LocalPort)
 	}
 
 	return nil
@@ -512,31 +540,30 @@ func (t *Tunnel) handleControlConn(conn net.Conn) {
 		parts := strings.Fields(line)
 		switch parts[0] {
 		case "ADD", "DEL":
-			if len(parts) < 2 {
-				fmt.Fprintf(conn, "ERR bad command\n")
-				continue
+			port := 0
+			if len(parts) >= 2 {
+				port, _ = strconv.Atoi(parts[1])
 			}
-			port, err := strconv.Atoi(parts[1])
-			if err != nil || port < 1 || port > 65535 {
+			if port < 1 || port > 65535 {
 				fmt.Fprintf(conn, "ERR invalid port\n")
 				continue
 			}
+			var err error
+			ok := ""
 			if parts[0] == "ADD" {
 				subdomain := ""
 				if len(parts) > 2 {
 					subdomain = parts[2]
 				}
-				if url, err := t.AddPort(uint16(port), subdomain); err != nil {
-					fmt.Fprintf(conn, "ERR %v\n", err)
-				} else {
-					fmt.Fprintf(conn, "OK %s\n", url)
-				}
-				continue
+				ok, err = t.AddPort(uint16(port), subdomain)
+			} else {
+				err = t.RemovePort(uint16(port))
+				ok = fmt.Sprintf("removed port %d", port)
 			}
-			if err := t.RemovePort(uint16(port)); err != nil {
+			if err != nil {
 				fmt.Fprintf(conn, "ERR %v\n", err)
 			} else {
-				fmt.Fprintf(conn, "OK removed port %d\n", port)
+				fmt.Fprintf(conn, "OK %s\n", ok)
 			}
 		case "LIST":
 			// Response: "OK <n>" followed by n lines "<port> <url>".
@@ -721,17 +748,6 @@ func (t *Tunnel) portFor(tunnelID uint64) (uint16, bool) {
 	return 0, false
 }
 
-// lookupPort resolves the local port for a tunnel, reporting 502 to the
-// server when the tunnel is unknown.
-func (t *Tunnel) lookupPort(tunnelID, requestID uint64) (uint16, bool) {
-	port, ok := t.portFor(tunnelID)
-	if !ok {
-		log.Printf("[client] unknown tunnel ID %d", tunnelID)
-		t.sendHTTPError(tunnelID, requestID, 502, fmt.Sprintf("unknown tunnel %d", tunnelID))
-	}
-	return port, ok
-}
-
 func copyHeaders(dst *http.Request, src map[string][]string) {
 	for k, values := range src {
 		switch k {
@@ -780,8 +796,10 @@ func (t *Tunnel) handleHTTPReq(frame protocol.Frame) {
 }
 
 func (t *Tunnel) handleNormalHTTPReq(tunnelID, requestID uint64, req protocol.HTTPRequest) {
-	localPort, ok := t.lookupPort(tunnelID, requestID)
+	localPort, ok := t.portFor(tunnelID)
 	if !ok {
+		log.Printf("[client] unknown tunnel ID %d", tunnelID)
+		t.sendHTTPError(tunnelID, requestID, 502, fmt.Sprintf("unknown tunnel %d", tunnelID))
 		return
 	}
 	log.Printf("[client] proxying %s %s -> localhost:%d (body: %d bytes)", req.Method, req.Path, localPort, len(req.Body))
@@ -949,8 +967,10 @@ func (t *Tunnel) handleWebSocketReq(tunnelID, requestID uint64, req protocol.HTT
 		return
 	}
 
-	localPort, ok := t.lookupPort(tunnelID, requestID)
+	localPort, ok := t.portFor(tunnelID)
 	if !ok {
+		log.Printf("[client] unknown tunnel ID %d", tunnelID)
+		t.sendHTTPError(tunnelID, requestID, 502, fmt.Sprintf("unknown tunnel %d", tunnelID))
 		return
 	}
 	log.Printf("[client] WebSocket upgrade: %s %s -> localhost:%d (%d bytes headers payload)", req.Method, req.Path, localPort, len(req.Headers))

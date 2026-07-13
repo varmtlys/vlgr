@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -291,8 +292,8 @@ func (tr *Tray) promptAdd() {
 }
 
 func parsePort(s string) (uint16, error) {
-	var p int
-	if _, err := fmt.Sscanf(s, "%d", &p); err != nil || p < 1 || p > 65535 {
+	p, err := strconv.Atoi(s)
+	if err != nil || p < 1 || p > 65535 {
 		return 0, fmt.Errorf("invalid port: %q", s)
 	}
 	return uint16(p), nil

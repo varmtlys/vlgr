@@ -28,7 +28,7 @@ func TestDashboard_RecordRingBuffer(t *testing.T) {
 	}
 }
 
-func TestClampInspectLimit(t *testing.T) {
+func TestInspectLimitClamped(t *testing.T) {
 	cases := map[int]int{
 		0:      defaultInspectLimit,
 		-5:     defaultInspectLimit,
@@ -38,8 +38,8 @@ func TestClampInspectLimit(t *testing.T) {
 		250000: maxInspectLimit,
 	}
 	for in, want := range cases {
-		if got := clampInspectLimit(in); got != want {
-			t.Errorf("clampInspectLimit(%d) = %d, want %d", in, got, want)
+		if got := NewDashboard("127.0.0.1:0", in).maxEntries; got != want {
+			t.Errorf("NewDashboard limit %d -> maxEntries %d, want %d", in, got, want)
 		}
 	}
 }

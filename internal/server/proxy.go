@@ -17,10 +17,11 @@ type ReverseProxy struct {
 	registry   *Registry
 	baseDomain string
 	debug      bool
+	protect    *Protector
 }
 
-func NewReverseProxy(registry *Registry, baseDomain string, debug bool) *ReverseProxy {
-	return &ReverseProxy{registry: registry, baseDomain: baseDomain, debug: debug}
+func NewReverseProxy(registry *Registry, baseDomain string, debug bool, protect *Protector) *ReverseProxy {
+	return &ReverseProxy{registry: registry, baseDomain: baseDomain, debug: debug, protect: protect}
 }
 
 func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -33,6 +34,10 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	tunnel := p.registry.Get(subdomain)
 	if tunnel == nil {
 		http.Error(w, fmt.Sprintf("tunnel %q not found", subdomain), http.StatusNotFound)
+		return
+	}
+
+	if !p.protect.Allow(w, r, subdomain) {
 		return
 	}
 
@@ -190,7 +195,7 @@ func (p *ReverseProxy) serveWebSocket(w http.ResponseWriter, tunnel *Tunnel, req
 	}
 	streamData := make(chan []byte, protocol.StreamRelayBuf)
 
-	requestID, resp, cleanup, err := tunnel.Handler.ForwardWebSocket(tunnel.ID, req, streamData)
+	requestID, resp, cleanup, err := tunnel.Handler.forward(tunnel.ID, req, streamData)
 	if err != nil {
 		log.Printf("[proxy] forward error for %s: %v", subdomain, err)
 		http.Error(w, "tunnel error", http.StatusBadGateway)

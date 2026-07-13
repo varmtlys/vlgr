@@ -23,18 +23,6 @@ const (
 	maxInspectLimit     = 100000
 )
 
-// clampInspectLimit keeps the ring-buffer size within [1, maxInspectLimit];
-// a non-positive limit falls back to the default.
-func clampInspectLimit(limit int) int {
-	if limit <= 0 {
-		return defaultInspectLimit
-	}
-	if limit > maxInspectLimit {
-		return maxInspectLimit
-	}
-	return limit
-}
-
 // ReqEntry is one recorded HTTP exchange that passed through the tunnel.
 type ReqEntry struct {
 	ID          int
@@ -72,9 +60,12 @@ type Dashboard struct {
 // (clamped to [1, 100000]; <=0 uses the default 1000). Older rows are
 // dropped as new ones arrive on top.
 func NewDashboard(addr string, limit int) *Dashboard {
+	if limit <= 0 {
+		limit = defaultInspectLimit
+	}
 	return &Dashboard{
 		addr:       addr,
-		maxEntries: clampInspectLimit(limit),
+		maxEntries: min(limit, maxInspectLimit),
 		subs:       make(map[chan *ReqEntry]struct{}),
 	}
 }

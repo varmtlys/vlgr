@@ -60,6 +60,23 @@ func (r *Registry) Get(subdomain string) *Tunnel {
 	return r.tunnels[subdomain]
 }
 
+// TunnelInfo is a snapshot of one registered tunnel for the admin API.
+type TunnelInfo struct {
+	ID        uint64 `json:"id"`
+	Subdomain string `json:"subdomain"`
+}
+
+// Snapshot lists the currently registered HTTP tunnels.
+func (r *Registry) Snapshot() []TunnelInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]TunnelInfo, 0, len(r.tunnels))
+	for _, t := range r.tunnels {
+		out = append(out, TunnelInfo{ID: t.ID, Subdomain: t.Subdomain})
+	}
+	return out
+}
+
 // generateTunnelID returns a random 64-bit tunnel identifier. Used for TCP
 // tunnels, which have no subdomain but still need a unique ID for routing.
 func generateTunnelID() uint64 {

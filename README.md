@@ -62,7 +62,7 @@ vlgr/
 │   ├── server/main.go              # Server entry point
 │   └── client/
 │       ├── main.go                 # Client entry point
-│       └── main_test.go            # 1 test with 26 address validation cases
+│       └── main_test.go            # 1 test with 18 address validation cases
 │
 ├── internal/
 │   ├── protocol/
@@ -72,14 +72,27 @@ vlgr/
 │   │   ├── version.go              # Version string for the handshake mismatch warning
 │   │   └── version_test.go
 │   ├── server/
-│   │   ├── registry.go             # Tunnel registry (subdomain → Tunnel)
+│   │   ├── registry.go             # Tunnel registry (subdomain → Tunnel) + Snapshot for the admin API
 │   │   ├── registry_test.go        # register, get, unregister, concurrency
-│   │   ├── handler.go              # Client WebSocket handler (HTTP + raw TCP tunnels)
+│   │   ├── handler.go              # Client WebSocket handler (HTTP + raw TCP + TLS-passthrough tunnels)
 │   │   ├── handler_test.go         # auth, registration, unregister, frame dispatch, stream relay
-│   │   ├── tcp.go                  # Public TCP port allocator for raw TCP tunnels
+│   │   ├── tcp.go                  # Public TCP port allocator for raw TCP / SSH tunnels
 │   │   ├── tcp_test.go             # Port allocator: auto/preferred allocation, release, exhaustion
 │   │   ├── proxy.go                # Reverse proxy for incoming HTTP, streamed transfers
-│   │   └── proxy_test.go           # subdomain extraction, response writing, header injection
+│   │   ├── proxy_test.go           # subdomain extraction, response writing, header injection
+│   │   ├── protect.go              # Endpoint protection: basic auth + IP allowlist (proxy guard)
+│   │   ├── protect_test.go         # basic auth, allowlist, X-Forwarded-For hop resolution
+│   │   ├── admin.go                # Admin REST API + status dashboard (read-only, Bearer-guarded)
+│   │   ├── admin_test.go           # tunnel listing, token guard
+│   │   ├── tlspass.go              # TLS-passthrough listener multiplexing tunnels by SNI
+│   │   ├── sni.go                  # ClientHello server_name parser (read-only, no TLS termination)
+│   │   └── sni_test.go             # SNI extraction from a real ClientHello
+│   ├── sshtun/
+│   │   ├── server.go               # Agentless SSH tunnels via ssh -R remote forwarding
+│   │   └── server_test.go          # end-to-end remote forward + auth failure
+│   ├── selfupdate/
+│   │   ├── selfupdate.go           # Signed self-update: poll releases, verify ed25519 sig, swap, relaunch
+│   │   └── selfupdate_test.go      # version compare, asset name, signature verification
 │   ├── client/
 │   │   ├── tunnel.go               # Client logic: connect, register, proxy, streamed bodies, TCP relay, control socket
 │   │   ├── tunnel_test.go          # routing, WS relay, body streams, error paths
@@ -94,9 +107,10 @@ vlgr/
 │       └── integration_test.go     # E2E: live server/client/backend, streamed bodies, raw TCP, inspector
 │
 ├── scripts/
-│   ├── build.ps1                   # Cross-compile for all platforms (PowerShell)
+│   ├── build.ps1                   # Cross-compile for all platforms (PowerShell); optional release signing
 │   ├── build.sh                    # Cross-compile for all platforms (Bash)
-│   └── deploy-server.sh            # One-command auto-deploy for VPS (multi-distro)
+│   ├── deploy-server.sh            # One-command auto-deploy for VPS (multi-distro)
+│   └── sign/main.go                # ed25519 keygen/sign helper for signed self-update releases
 │
 └── docs/
     └── Caddyfile                   # Caddy config reference
@@ -149,6 +163,7 @@ Every message is wrapped in a fixed binary frame:
 | `0x0F` | `MsgUnregisterErr` | Server → Client | Unregister error (unknown tunnel) |
 | `0x10` | `MsgRegisterTCP` | Client → Server | Register a raw TCP tunnel (local port + requested public port) |
 | `0x11` | `MsgTCPOpen` | Both | Server → Client: new public TCP connection to relay. Client → Server: local connection is up (readiness ack) |
+| `0x12` | `MsgRegisterTLS` | Client → Server | Register a TLS-passthrough tunnel (local port + optional subdomain), routed publicly by SNI |
 
 ### Auth payload (`MsgAuth` / `MsgAuthOK`)
 
@@ -199,6 +214,33 @@ as a readiness ack so the server doesn't forward bytes before the relay is
 wired up. Data then flows both ways as `MsgStreamData` frames terminated by
 `MsgStreamClose` — the same relay machinery as WebSocket upgrades. Raw TCP
 bypasses Caddy, so its ports must be reachable directly on the server.
+
+### TLS passthrough (SNI)
+
+The client can expose a local TLS service without the relay terminating TLS
+(`MsgRegisterTLS`, same payload as `MsgRegister`). The server runs a single
+public TLS listener (`--tls-passthrough`) that peeks the ClientHello, reads the
+`server_name` (SNI), maps it to a registered TLS tunnel by subdomain, and
+relays the raw bytes — including the peeked ClientHello — to the client's local
+port over the same `MsgTCPOpen`/`MsgStreamData` machinery as raw TCP. Many TLS
+hostnames therefore share one public port, and certificates stay entirely on
+the local service. Like raw TCP, this port bypasses Caddy and must be reachable
+directly.
+
+### Agentless SSH tunnels
+
+The relay can also expose local services to users who have no vlgr client at
+all — just a stock `ssh`. With `--ssh :2222` (and `--ssh-ports` for the public
+range) the server runs an SSH endpoint that accepts standard remote forwarding:
+
+```bash
+ssh -N -R 0:localhost:3000 tunnel.domain.com -p 2222
+```
+
+The server allocates a public TCP port, prints it back (per the `tcpip-forward`
+reply), and relays every connection to the user's local port over the SSH
+`forwarded-tcpip` channel. When the server has `--token` set it is required as
+the SSH password. `--ssh-hostkey <path>` persists the host key across restarts.
 
 ### Keep-alive
 
@@ -265,10 +307,11 @@ HTTP handler for external traffic. Implements `http.Handler`.
 
 1. Extract subdomain from `Host` header using `extractSubdomain(host, baseDomain)`.
 2. Look up tunnel in registry → 404 if missing.
-3. Read request body up to 4 MB; a larger body is pumped concurrently as `MsgStreamData` chunks (no size limit).
-4. Serialize into `protocol.HTTPRequest`, adding `X-Forwarded-Host/Proto/For`.
-5. Forward through the tunnel — blocks until the response header arrives.
-6. Write the response: inline body directly, streamed body chunk-by-chunk with a `Flush` after each chunk (SSE-friendly).
+3. Apply endpoint protection (`Protector.Allow`): IP allowlist and/or Basic auth → 403/401 if blocked (no-op when neither is configured).
+4. Read request body up to 4 MB; a larger body is pumped concurrently as `MsgStreamData` chunks (no size limit).
+5. Serialize into `protocol.HTTPRequest`, adding `X-Forwarded-Host/Proto/For`.
+6. Forward through the tunnel — blocks until the response header arrives.
+7. Write the response: inline body directly, streamed body chunk-by-chunk with a `Flush` after each chunk (SSE-friendly).
 
 **Subdomain extraction:**
 
@@ -395,7 +438,7 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 10. **Client serializes response** — `EncodeHTTPResponse(...)`
 11. **Client sends response** — `MsgHTTPRes` with same `RequestID: 42`
 12. **Server receives response** — `handleHTTPRes` routes to pending request channel
-13. **Proxy wakes up** — `ForwardHTTP` returns `HTTPResponse`
+13. **Proxy wakes up** — `awaitResponse` returns `HTTPResponse`
 14. **Proxy writes to external user** — HTTP 200 + JSON body
 15. **External user gets response** — `{"status": "ok", "uptime": 12345}`
 
@@ -413,8 +456,44 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 | `--token` | `-t` | `""` | Auth token for clients (empty = no auth, or set `VLGR_TOKEN` env) |
 | `--verbose` | `-V` | `info` | Log level: `info` (default) or `debug` |
 | `--tcp-ports` | | | Public TCP port range for raw TCP tunnels, e.g. `20000-20100` (empty = disabled) |
+| `--basic-auth` | | | Protect all tunnels with HTTP Basic auth, `user:pass` (empty = off) |
+| `--allow-ips` | | | Comma-separated IP/CIDR allowlist for public traffic (empty = allow all) |
+| `--trusted-proxy-hops` | | `0` | Trusted reverse proxies in front (set `1` behind Caddy); `0` uses the direct peer IP |
+| `--admin` | | | REST API + dashboard listen address, e.g. `127.0.0.1:4041` (empty = disabled) |
+| `--tls-passthrough` | | | Public TLS-passthrough (SNI) listen address, e.g. `:443` (empty = disabled) |
+| `--ssh` | | | Agentless SSH tunnel listen address, e.g. `:2222` (empty = disabled) |
+| `--ssh-ports` | | | Public TCP port range for SSH remote forwards, e.g. `20200-20300` |
+| `--ssh-hostkey` | | | Path to persist the SSH host key (empty = ephemeral per start) |
+| `--autoupdate` | | `false` | Poll GitHub releases and self-update in the background |
 | `--version` | `-v` | | Show version and exit |
 | `--help` | `-h` | | Show help with usage examples |
+
+**Self-update.** With `--autoupdate` the server polls GitHub releases hourly
+and, on a newer tag, downloads the matching binary, **verifies its detached
+ed25519 signature** (compiled-in public key + per-release `<asset>.sig`), swaps
+it on disk and relaunches. An unsigned or mismatched binary is refused, and a
+build without a compiled-in key never self-updates (fail-safe). Before
+relaunching it closes every listener so the replacement can bind the same
+ports; hijacked client tunnels drop and reconnect on their own. Development
+builds are skipped. Disabled by default.
+
+**Admin API + dashboard.** `--admin <addr>` starts a read-only REST API and a
+status page. `GET /api/status` returns version, uptime and tunnel count;
+`GET /api/tunnels` lists the active HTTP tunnels; `/` serves a small live
+dashboard. Bind it to loopback; when the server has `--token` set, the same
+token guards the admin endpoints as a `Bearer` token.
+
+**Endpoint protection.** `--basic-auth` and `--allow-ips` guard every public
+request before it is forwarded into a tunnel. The IP allowlist is checked
+against the originating client IP, resolved with `--trusted-proxy-hops`: the
+default `0` uses the direct connection (`RemoteAddr`) and ignores
+`X-Forwarded-For` entirely, so a client cannot spoof its source. Behind one
+reverse proxy (Caddy) set `--trusted-proxy-hops 1` — the server then reads the
+address that proxy appended (the rightmost `X-Forwarded-For` entry), so
+attacker-supplied leftmost entries are ignored. Both guards are enforced
+server-wide. TLS client certificates (mTLS) and OAuth are intentionally left to
+the fronting proxy (Caddy), which already terminates TLS and can enforce them
+per host.
 
 ### Client (`cmd/client`)
 
@@ -423,6 +502,7 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 | `--server` | `-s` | `localhost:4443` | VLGR server address |
 | `--ports` | `-p` | | Local port(s) to expose over HTTP, comma-separated (e.g. `3000` or `8080,3000`) |
 | `--tcp` | | | Local port(s) to expose as raw TCP, comma-separated: `<local[:remote]>` (e.g. `22` or `22:2222,5432`) |
+| `--tls-tunnel` | | | Local TLS port(s) to expose via SNI passthrough: `<local[:subdomain]>` (e.g. `8443` or `8443:mysub`) |
 | `--token` | `-t` | `""` | Authentication token (required when server has `--token` set) |
 | `--subdomain` | `-u` | auto | Request custom subdomain(s), comma-separated — order matches `--ports` |
 | `--tls` | | `false` | Use WSS (TLS) — required when connecting via Caddy/HTTPS |
@@ -430,6 +510,7 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 | `--tray` | | `false` | Show a system tray icon for this instance (Windows/Linux) with a menu to view, add and remove forwards |
 | `--inspect` | | | Traffic inspector dashboard address, e.g. `127.0.0.1:4040` (empty = disabled) |
 | `--inspect-limit` | | `1000` | Max rows kept in the inspector (older dropped, new on top); capped at `100000` |
+| `--autoupdate` | | `false` | Poll GitHub releases and self-update in the background |
 | `--add` | | | Add a port with subdomain to a running instance: `"<port> <subdomain>"` — must be used alone |
 | `--del` | | | Remove a port forward (and its subdomain) from a running instance: `<port>` — must be used alone |
 | `--version` | `-v` | | Show version and exit |
@@ -481,6 +562,20 @@ etc.; the text dump is a plain human-readable request/response log. Both are
 also available directly at `/api/export.har` and `/api/export.txt`.
 
 The dashboard is bound locally and never exposed through the tunnel.
+
+### Self-update
+
+With `--autoupdate` the client polls the GitHub releases API hourly and, when a
+newer tag ships, downloads the matching binary for its OS/arch, **verifies its
+detached ed25519 signature**, then swaps it on disk and relaunches with the
+same arguments. The public key is compiled in at build time
+(`-ldflags "-X vlgr/internal/selfupdate.SigningPublicKey=<hex>"`) and each
+release ships a `<asset>.sig` file; if the signature is missing or does not
+match, the update is refused and the running binary is left untouched. A build
+with no key compiled in never self-updates (fail-safe). Development builds
+(`version = dev`) are skipped. The relaunch drops the tunnel briefly; the new
+process reconnects on its own, so an open forward recovers within the usual
+reconnect backoff. Disabled by default.
 
 ---
 
