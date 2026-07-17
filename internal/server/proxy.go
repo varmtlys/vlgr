@@ -165,6 +165,7 @@ func (p *ReverseProxy) streamResponse(w http.ResponseWriter, h *ClientHandler, r
 	defer h.SendStreamClose(requestID)
 
 	copyValidHeaders(resp.Headers, w.Header().Add)
+	setSecurityDefaults(w)
 	w.WriteHeader(int(resp.StatusCode))
 	flusher, _ := w.(http.Flusher)
 
@@ -280,15 +281,20 @@ func (p *ReverseProxy) serveWebSocket(w http.ResponseWriter, tunnel *Tunnel, req
 
 func writeNormalResponse(w http.ResponseWriter, resp protocol.HTTPResponse) {
 	copyValidHeaders(resp.Headers, w.Header().Add)
-	// Security defaults only when the app didn't set its own.
+	setSecurityDefaults(w)
+	w.WriteHeader(int(resp.StatusCode))
+	w.Write(resp.Body)
+}
+
+// setSecurityDefaults adds hardening headers only when the app didn't set its
+// own. Applied to both buffered and streamed responses.
+func setSecurityDefaults(w http.ResponseWriter) {
 	if w.Header().Get("X-Content-Type-Options") == "" {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 	}
 	if w.Header().Get("X-Frame-Options") == "" {
 		w.Header().Set("X-Frame-Options", "DENY")
 	}
-	w.WriteHeader(int(resp.StatusCode))
-	w.Write(resp.Body)
 }
 
 func copyValidHeaders(headers map[string][]string, add func(key, value string)) {

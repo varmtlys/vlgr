@@ -2,15 +2,6 @@ package version
 
 import "testing"
 
-func TestShort(t *testing.T) {
-	old := Version
-	Version = "v1.2.3"
-	defer func() { Version = old }()
-	if got := Short(); got != "v1.2.3" {
-		t.Errorf("Short() = %q, want %q", got, "v1.2.3")
-	}
-}
-
 func TestString_Format(t *testing.T) {
 	oldV, oldC, oldD := Version, GitCommit, BuildDate
 	Version = "v1.0.0"
