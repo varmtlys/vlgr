@@ -240,7 +240,9 @@ ssh -N -R 0:localhost:3000 tunnel.domain.com -p 2222
 The server allocates a public TCP port, prints it back (per the `tcpip-forward`
 reply), and relays every connection to the user's local port over the SSH
 `forwarded-tcpip` channel. When the server has `--token` set it is required as
-the SSH password. `--ssh-hostkey <path>` persists the host key across restarts.
+the SSH password; without a token the endpoint accepts anyone and logs a
+warning at startup, so set a token whenever the port range is publicly
+reachable. `--ssh-hostkey <path>` persists the host key across restarts.
 
 ### Keep-alive
 
@@ -480,8 +482,11 @@ builds are skipped. Disabled by default.
 **Admin API + dashboard.** `--admin <addr>` starts a read-only REST API and a
 status page. `GET /api/status` returns version, uptime and tunnel count;
 `GET /api/tunnels` lists the active HTTP tunnels; `/` serves a small live
-dashboard. Bind it to loopback; when the server has `--token` set, the same
-token guards the admin endpoints as a `Bearer` token.
+dashboard. Loopback callers reaching it by a loopback `Host` are trusted, so
+the local dashboard works without a token; any remote caller must present the
+`--token` value as a `Bearer` token, and remote access is refused outright when
+no token is set. The `Host` check also blocks DNS-rebinding. Bind it to
+loopback and reach it over an SSH tunnel or a protected Caddy vhost.
 
 **Endpoint protection.** `--basic-auth` and `--allow-ips` guard every public
 request before it is forwarded into a tunnel. The IP allowlist is checked
@@ -561,7 +566,9 @@ Archive format importable into browser DevTools, Charles, Fiddler, Postman,
 etc.; the text dump is a plain human-readable request/response log. Both are
 also available directly at `/api/export.har` and `/api/export.txt`.
 
-The dashboard is bound locally and never exposed through the tunnel.
+The dashboard is loopback-only: it rejects non-loopback callers, checks the
+`Host` header to block DNS-rebinding, and refuses cross-site replay requests. It
+is never exposed through the tunnel.
 
 ### Self-update
 
