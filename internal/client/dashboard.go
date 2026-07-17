@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -74,13 +75,13 @@ func NewDashboard(addr string, limit int) *Dashboard {
 // bad address is reported immediately.
 func (d *Dashboard) Start() error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", d.handleIndex)
-	mux.HandleFunc("/api/requests", d.handleList)
-	mux.HandleFunc("/api/request/", d.handleDetail)
-	mux.HandleFunc("/api/replay/", d.handleReplay)
-	mux.HandleFunc("/api/stream", d.handleStream)
-	mux.HandleFunc("/api/export.har", d.handleExportHAR)
-	mux.HandleFunc("/api/export.txt", d.handleExportText)
+	mux.HandleFunc("/", d.local(d.handleIndex))
+	mux.HandleFunc("/api/requests", d.local(d.handleList))
+	mux.HandleFunc("/api/request/", d.local(d.handleDetail))
+	mux.HandleFunc("/api/replay/", d.local(d.handleReplay))
+	mux.HandleFunc("/api/stream", d.local(d.handleStream))
+	mux.HandleFunc("/api/export.har", d.local(d.handleExportHAR))
+	mux.HandleFunc("/api/export.txt", d.local(d.handleExportText))
 
 	ln, err := net.Listen("tcp", d.addr)
 	if err != nil {
@@ -96,6 +97,55 @@ func (d *Dashboard) Stop() {
 	if d.srv != nil {
 		d.srv.Close()
 	}
+}
+
+// local restricts the inspector to loopback callers. The peer check rejects
+// remote clients even when bound to a non-loopback address; the Host check
+// blocks DNS-rebinding; and cross-site state changes (replay) are refused when
+// the Origin doesn't match. The inspector exposes captured request/response
+// bodies and can replay them against the local service, so it stays local-only.
+func (d *Dashboard) local(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !peerIsLoopback(r.RemoteAddr) || !hostIsLoopback(r.Host) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if o := r.Header.Get("Origin"); o != "" && !originHostMatches(o, r.Host) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+		}
+		h(w, r)
+	}
+}
+
+func peerIsLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func hostIsLoopback(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func originHostMatches(origin, host string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return u.Host == host
 }
 
 // record captures one exchange and notifies live subscribers.
