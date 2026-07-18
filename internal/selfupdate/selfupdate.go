@@ -32,6 +32,10 @@ import (
 // anchor to verify the downloaded binary against.
 var SigningPublicKey string
 
+// maxDownloadSize caps the release binary download so a compromised or
+// misbehaving host cannot exhaust the disk before the signature is checked.
+const maxDownloadSize = 256 << 20
+
 // Config drives the update loop.
 type Config struct {
 	Repo    string        // GitHub "owner/name", e.g. "varmtlys/vlgr"
@@ -188,7 +192,7 @@ func download(url, dst, permFrom string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	if _, err := io.Copy(f, io.LimitReader(resp.Body, maxDownloadSize)); err != nil {
 		f.Close()
 		os.Remove(dst)
 		return err
@@ -279,13 +283,23 @@ func relaunch(exe string, before func()) {
 // Both are compared as dot-separated numeric components after a leading "v";
 // a non-numeric or unparseable tag falls back to a plain inequality.
 func newer(current, latest string) bool {
+	if latest == current {
+		return false
+	}
 	cur := strings.Split(strings.TrimPrefix(current, "v"), ".")
 	lat := strings.Split(strings.TrimPrefix(latest, "v"), ".")
 	for i := 0; i < len(cur) || i < len(lat); i++ {
 		c := numAt(cur, i)
 		l := numAt(lat, i)
-		if c < 0 || l < 0 {
-			return latest != current // non-numeric: only update on a change
+		if l < 0 {
+			// Latest has an unparseable component: don't treat it as newer,
+			// so a stray non-numeric tag can't trigger a sidegrade.
+			return false
+		}
+		if c < 0 {
+			// Current is unparseable (e.g. a dev build) but latest is a real
+			// numeric release: update.
+			return true
 		}
 		if l != c {
 			return l > c
@@ -294,11 +308,22 @@ func newer(current, latest string) bool {
 	return false
 }
 
+// numAt returns the leading integer of the i-th version component, ignoring a
+// pre-release suffix like "3-rc1". It is 0 past the end and -1 when the
+// component has no leading digit.
 func numAt(parts []string, i int) int {
 	if i >= len(parts) {
 		return 0
 	}
-	n, err := strconv.Atoi(parts[i])
+	s := parts[i]
+	j := 0
+	for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+		j++
+	}
+	if j == 0 {
+		return -1
+	}
+	n, err := strconv.Atoi(s[:j])
 	if err != nil {
 		return -1
 	}

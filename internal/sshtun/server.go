@@ -51,6 +51,7 @@ func New(addr, token, hostKeyPath string, alloc PortAllocator) (*Server, error) 
 	cfg := &ssh.ServerConfig{}
 	if token == "" {
 		cfg.NoClientAuth = true
+		log.Printf("[ssh] WARNING: no token set — anyone can open public forwards on this server")
 	} else {
 		cfg.PasswordCallback = func(_ ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
 			if subtle.ConstantTimeCompare(pass, []byte(token)) != 1 {

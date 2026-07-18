@@ -468,8 +468,9 @@ to the local app. `--inspect-limit N` caps how many requests are kept
 (default 1000, max 100000; oldest drop off as new arrive). The dashboard can
 export the captured traffic as **HAR** (`.har`, the standard HTTP Archive
 format read by browser DevTools, Charles, Fiddler, Postman…) or as a plain
-human-readable **text** dump. The dashboard is bound locally and is never
-exposed through the tunnel.
+human-readable **text** dump. The dashboard is loopback-only — it rejects
+non-loopback callers, checks the `Host` header to block DNS-rebinding, and
+refuses cross-site replay — and is never exposed through the tunnel.
 
 ### Endpoint protection (server)
 
@@ -490,10 +491,11 @@ OAuth are intentionally left to Caddy, which terminates TLS.
 ### Admin API + dashboard (server)
 
 `--admin 127.0.0.1:4041` exposes a read-only REST API (`/api/status`,
-`/api/tunnels`) and a small live status page. Bind it to loopback; when the
-server has a token, the same token guards the admin endpoints as a `Bearer`
-token. Reach it over an SSH tunnel or a protected Caddy vhost — do not expose
-it publicly.
+`/api/tunnels`) and a small live status page. Loopback callers are trusted, so
+the local dashboard needs no token; a remote caller must send the token as a
+`Bearer` token, and with no token set remote access is refused. The `Host`
+check blocks DNS-rebinding. Reach it over an SSH tunnel or a protected Caddy
+vhost — do not expose it publicly.
 
 ### TLS-passthrough tunnels (SNI)
 
@@ -525,9 +527,10 @@ an SSH endpoint and a public port range on the server:
 ssh -N -R 0:localhost:3000 tunnel.domain.com -p 2222
 ```
 
-When the server has a token it is required as the SSH password.
-`--ssh-hostkey <path>` persists the host key so clients don't see key-changed
-warnings across restarts.
+When the server has a token it is required as the SSH password; without a token
+the endpoint accepts anyone and logs a warning at startup, so set a token when
+the port range is publicly reachable. `--ssh-hostkey <path>` persists the host
+key so clients don't see key-changed warnings across restarts.
 
 ### Signed self-update
 

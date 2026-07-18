@@ -49,19 +49,48 @@ func (a *AdminServer) Stop() {
 	}
 }
 
-// guard applies the optional bearer-token check to a handler.
+// guard authorizes an admin request. A loopback caller reaching the server by
+// a loopback Host is trusted without a token (the local dashboard) — the Host
+// check blocks DNS-rebinding. Any other caller must present the bearer token,
+// which is refused outright when no token is configured, so binding the admin
+// API to a non-loopback address without a token does not expose it.
 func (a *AdminServer) guard(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if a.token != "" {
-			const prefix = "Bearer "
-			got := r.Header.Get("Authorization")
-			if len(got) <= len(prefix) || subtle.ConstantTimeCompare([]byte(got[len(prefix):]), []byte(a.token)) != 1 {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
+		if (peerIsLoopback(r.RemoteAddr) && hostIsLoopback(r.Host)) || a.tokenOK(r) {
+			h(w, r)
+			return
 		}
-		h(w, r)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}
+}
+
+func (a *AdminServer) tokenOK(r *http.Request) bool {
+	if a.token == "" {
+		return false
+	}
+	const prefix = "Bearer "
+	got := r.Header.Get("Authorization")
+	return len(got) > len(prefix) && subtle.ConstantTimeCompare([]byte(got[len(prefix):]), []byte(a.token)) == 1
+}
+
+func peerIsLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func hostIsLoopback(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (a *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {

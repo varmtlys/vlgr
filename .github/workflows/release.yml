@@ -1,0 +1,39 @@
+name: release
+
+# Builds, signs and publishes a GitHub release whenever a version tag is pushed.
+# Tag the released commit on main (e.g. `git tag v2.2 && git push origin v2.2`);
+# this workflow then cross-compiles every target, signs each binary with the
+# private seed held in the VLGR_SIGNING_KEY secret (never exposed publicly), and
+# creates the release with RELEASE_NOTES.md as its body.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build and sign all targets
+        env:
+          VLGR_SIGNING_KEY: ${{ secrets.VLGR_SIGNING_KEY }}
+        run: |
+          test -n "$VLGR_SIGNING_KEY" || { echo "VLGR_SIGNING_KEY secret is not set; refusing to publish unsigned binaries (self-update would break)"; exit 1; }
+          ./scripts/build.sh
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" build/* \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file RELEASE_NOTES.md

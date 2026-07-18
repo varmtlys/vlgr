@@ -555,6 +555,11 @@ func (h *ClientHandler) handleHTTPRes(frame protocol.Frame) {
 		log.Printf("[handler] no pending request for ID %d", frame.RequestID)
 		return
 	}
+	if pr.response == nil {
+		// Raw TCP/TLS relays have no HTTP response channel; a stray response
+		// frame for one is bogus — ignore it instead of blocking on nil.
+		return
+	}
 
 	select {
 	case pr.response <- resp:

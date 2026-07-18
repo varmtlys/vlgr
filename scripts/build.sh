@@ -10,6 +10,12 @@
 #
 # Available targets: windows/amd64, windows/x86, linux/amd64, linux/x86, linux/arm64, darwin/amd64, darwin/arm64
 #
+# Signed self-update (optional): pass an ed25519 private seed (hex) via -s or the
+# VLGR_SIGNING_KEY env var. The public key is then compiled into every binary and
+# a <binary>.sig is written alongside it. Generate a key once with:
+#   go run ./scripts/sign genkey
+# Without a key the binaries build unsigned and cannot self-update (fail-safe).
+#
 # Requires: Go 1.26+ installed and in PATH.
 
 set -euo pipefail
@@ -26,13 +32,27 @@ BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 LDFLAGS="-s -w -X vlgr/internal/version.Version=${GIT_VERSION} -X vlgr/internal/version.GitCommit=${GIT_COMMIT} -X vlgr/internal/version.BuildDate=${BUILD_DATE}"
 
 TARGETS_FILTER=""
+SIGN_KEY="${VLGR_SIGNING_KEY:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -t) TARGETS_FILTER="$2"; shift 2 ;;
+        -s) SIGN_KEY="$2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+# With a signing key, derive its public key on the host and compile it into
+# every binary, so each build verifies its own updates.
+SIGN_PUBKEY=""
+if [ -n "$SIGN_KEY" ]; then
+    SIGN_PUBKEY="$(go run ./scripts/sign pubkey "$SIGN_KEY")"
+    [ -n "$SIGN_PUBKEY" ] || { echo "Failed to derive signing public key" >&2; exit 1; }
+    LDFLAGS="$LDFLAGS -X vlgr/internal/selfupdate.SigningPublicKey=${SIGN_PUBKEY}"
+fi
+
+# Absolute paths of every artifact produced, for the signing pass.
+BUILT=()
 
 # All supported targets: OS GoArch Label Ext
 ALL_TARGETS=(
@@ -84,6 +104,8 @@ build_app() {
         exit 1
     }
 
+    BUILT+=("$out_path")
+
     local size
     size=$(du -h "$out_path" | cut -f1)
     echo -e "${GREEN}  -> $out_name ($size)${NC}"
@@ -109,7 +131,7 @@ for entry in "${ALL_TARGETS[@]}"; do
     read -r os goarch label ext <<< "$entry"
 
     if [ -n "$TARGETS_FILTER" ]; then
-        local key="${os}/${label}"
+        key="${os}/${label}"
         # shellcheck disable=SC2076
         if [[ ! ",${TARGETS_FILTER}," =~ ",${key}," ]]; then
             continue
@@ -119,12 +141,22 @@ for entry in "${ALL_TARGETS[@]}"; do
     echo -e "${YELLOW}--- $os ($label) ---${NC}"
 
     for app_def in "${APPS[@]}"; do
-        local name="${app_def%%:*}"
-        local src="${app_def##*:}"
+        name="${app_def%%:*}"
+        src="${app_def##*:}"
         build_app "$os" "$goarch" "$label" "$ext" "$name" "$src"
     done
     echo ""
 done
+
+# Sign every artifact so the self-updater can verify it before installing.
+if [ -n "$SIGN_KEY" ]; then
+    echo -e "${CYAN}Signing ${#BUILT[@]} binaries (public key $SIGN_PUBKEY)...${NC}"
+    go run ./scripts/sign sign "$SIGN_KEY" "${BUILT[@]}"
+    echo ""
+else
+    echo -e "${YELLOW}No signing key set (VLGR_SIGNING_KEY / -s): binaries are unsigned and will not self-update.${NC}"
+    echo ""
+fi
 
 echo -e "${YELLOW}========================================"
 echo -e "  ${GREEN}Build complete!${YELLOW}"
@@ -132,8 +164,8 @@ echo -e "  Output:${NC}"
 
 for f in "$BUILD_DIR"/*; do
     if [ -f "$f" ]; then
-        local name; name=$(basename "$f")
-        local size; size=$(du -h "$f" | cut -f1)
+        name=$(basename "$f")
+        size=$(du -h "$f" | cut -f1)
         echo -e "    $name ($size)"
     fi
 done | sort

@@ -38,6 +38,10 @@ $ldflags = "-s -w " +
     "-X vlgr/internal/version.GitCommit=$gitCommit " +
     "-X vlgr/internal/version.BuildDate=$buildDate"
 
+# Clear any cross-compilation env left over from a previous run in this shell,
+# so host tools (go run ./scripts/sign) build and execute for the host.
+Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED -ErrorAction SilentlyContinue
+
 # When a signing key is supplied, embed its public key so the resulting
 # binaries verify their own updates. Derived on the host, before any GOOS/GOARCH
 # is set for cross-compilation.
@@ -159,5 +163,8 @@ try {
     }
     Write-Host "========================================" -ForegroundColor Yellow
 } finally {
+    # Don't leak cross-compilation env into the caller's shell — otherwise the
+    # next `go run` in this session would target the last-built GOOS/GOARCH.
+    Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED -ErrorAction SilentlyContinue
     Pop-Location
 }
