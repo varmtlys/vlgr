@@ -28,7 +28,7 @@ jobs:
           VLGR_SIGNING_KEY: ${{ secrets.VLGR_SIGNING_KEY }}
         run: |
           test -n "$VLGR_SIGNING_KEY" || { echo "VLGR_SIGNING_KEY secret is not set; refusing to publish unsigned binaries (self-update would break)"; exit 1; }
-          ./scripts/build.sh
+          bash scripts/build.sh
 
       - name: Create GitHub release
         env:
