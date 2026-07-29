@@ -15,6 +15,7 @@ import (
 	"fyne.io/systray"
 
 	"vlgr/internal/protocol"
+	"vlgr/internal/version"
 )
 
 // Tray icon: a diagonal arrow with an arrowhead and tail feathers,
@@ -61,7 +62,24 @@ func (s *traySlot) set(port uint16, url, scheme string) {
 	s.scheme = scheme
 	s.mu.Unlock()
 	s.item.SetTitle(fmt.Sprintf("%d → %s", port, url))
+	// Raw TCP/TLS forwards carry their own scheme and are not browsable.
+	if strings.Contains(url, "://") {
+		s.open.Disable()
+	} else {
+		s.open.Enable()
+	}
 	s.item.Show()
+}
+
+// href returns the browser URL of the forward, or "" when there is nothing
+// a browser can open (inactive slot, or a raw TCP/TLS tunnel).
+func (s *traySlot) href() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.active || s.url == "" || strings.Contains(s.url, "://") {
+		return ""
+	}
+	return s.scheme + "://" + s.url
 }
 
 func (s *traySlot) clear() {
@@ -73,10 +91,11 @@ func (s *traySlot) clear() {
 	s.item.Hide()
 }
 
-func (s *traySlot) snapshot() (active bool, port uint16, url, scheme string) {
+// target returns the forward this row currently stands for.
+func (s *traySlot) target() (active bool, port uint16) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.active, s.port, s.url, s.scheme
+	return s.active, s.port
 }
 
 // Tray shows a system tray icon for one client instance with a menu to
@@ -92,8 +111,11 @@ type Tray struct {
 	status *systray.MenuItem
 	slots  []*traySlot
 	add    *systray.MenuItem
+	about  *systray.MenuItem
 	quit   *systray.MenuItem
-	stopCh chan struct{} // closed once on shutdown to release click watchers
+
+	stopCh   chan struct{} // closed once on shutdown to release click watchers
+	stopOnce sync.Once
 }
 
 func NewTray(label string, onQuit func()) *Tray {
@@ -140,6 +162,7 @@ func (tr *Tray) onReady() {
 
 	systray.AddSeparator()
 	tr.add = systray.AddMenuItem("Add forward…", "Add a port forward")
+	tr.about = systray.AddMenuItem("About "+version.Name+"…", "Show version and application info")
 	tr.quit = systray.AddMenuItem("Quit", "Stop this vlgr-client instance")
 
 	go tr.watchControls()
@@ -161,12 +184,11 @@ func (tr *Tray) watchSlot(s *traySlot) {
 		case <-tr.stopCh:
 			return
 		case <-s.open.ClickedCh:
-			active, _, url, scheme := s.snapshot()
-			if active && url != "" {
-				openBrowser(scheme + "://" + url)
+			if href := s.href(); href != "" {
+				openBrowser(href)
 			}
 		case <-s.del.ClickedCh:
-			active, port, _, _ := s.snapshot()
+			active, port := s.target()
 			t := tr.currentTunnel()
 			if active && t != nil {
 				go func() {
@@ -186,6 +208,8 @@ func (tr *Tray) watchControls() {
 			return
 		case <-tr.add.ClickedCh:
 			go tr.promptAdd()
+		case <-tr.about.ClickedCh:
+			go showMessage(version.Name, version.About("vlgr-client"))
 		case <-tr.quit.ClickedCh:
 			if tr.onQuit != nil {
 				tr.onQuit()
@@ -195,8 +219,9 @@ func (tr *Tray) watchControls() {
 	}
 }
 
-// Stop terminates the tray loop (Run returns).
+// Stop terminates the tray loop (Run returns) and releases the click watchers.
 func (tr *Tray) Stop() {
+	tr.stopOnce.Do(func() { close(tr.stopCh) })
 	systray.Quit()
 }
 

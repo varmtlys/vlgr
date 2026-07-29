@@ -395,7 +395,7 @@ func main() {
 	}
 
 	if *showVer {
-		fmt.Printf("vlgr-client %s\n", version.String())
+		fmt.Print(version.About("vlgr-client"))
 		os.Exit(0)
 	}
 
