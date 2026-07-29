@@ -4,6 +4,7 @@ package client
 
 import (
 	"fmt"
+	"log"
 	"os/exec"
 	"strings"
 )
@@ -26,6 +27,20 @@ func promptInput(title, prompt string) (string, error) {
 		return strings.TrimSpace(string(out)), nil
 	}
 	return "", fmt.Errorf("no dialog tool found (install zenity or kdialog), use 'vlgr-client --add' instead")
+}
+
+// showMessage displays a message dialog via zenity or kdialog, falling back
+// to the log when neither is installed.
+func showMessage(title, text string) {
+	if path, err := exec.LookPath("zenity"); err == nil {
+		exec.Command(path, "--info", "--no-markup", "--title", title, "--text", text).Run()
+		return
+	}
+	if path, err := exec.LookPath("kdialog"); err == nil {
+		exec.Command(path, "--title", title, "--msgbox", text).Run()
+		return
+	}
+	log.Printf("[tray] %s\n%s", title, text)
 }
 
 // openBrowser opens a URL in the default browser.

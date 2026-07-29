@@ -15,6 +15,7 @@ VLGR is an HTTP tunnel that exposes your local server to the internet through a 
 7. [Request Flow (Step by Step)](#request-flow-step-by-step)
 8. [CLI Flags](#cli-flags)
 9. [Production Deployment](#production-deployment)
+10. [License](#license)
 
 ---
 
@@ -57,6 +58,7 @@ vlgr/
 ├── .gitignore
 ├── README.md
 ├── GETTING_STARTED.md
+├── LICENSE                         # MIT
 │
 ├── cmd/
 │   ├── server/main.go              # Server entry point
@@ -69,7 +71,7 @@ vlgr/
 │   │   ├── protocol.go             # Binary protocol: framing, HTTP serialization, streamed bodies
 │   │   └── protocol_test.go        # 49 unit tests: frames, HTTP serde, register/auth codecs, WS detection
 │   ├── version/
-│   │   ├── version.go              # Version string for the handshake mismatch warning
+│   │   ├── version.go              # Version string (handshake mismatch warning) + application info block
 │   │   └── version_test.go
 │   ├── server/
 │   │   ├── registry.go             # Tunnel registry (subdomain → Tunnel) + Snapshot for the admin API
@@ -98,8 +100,8 @@ vlgr/
 │   │   ├── tunnel_test.go          # routing, WS relay, body streams, error paths
 │   │   ├── tray.go                 # System tray icon and menu (Windows/Linux, fyne.io/systray)
 │   │   ├── tray_stub.go            # No-op Tray for platforms without tray support (keeps darwin builds cgo-free)
-│   │   ├── tray_input_windows.go   # Native input box + browser open (Windows)
-│   │   ├── tray_input_linux.go     # Input dialog via zenity/kdialog + xdg-open (Linux)
+│   │   ├── tray_input_windows.go   # Native input/message box + browser open (Windows)
+│   │   ├── tray_input_linux.go     # Input/message dialog via zenity/kdialog + xdg-open (Linux)
 │   │   ├── dashboard.go            # Traffic inspector: ring buffer + local web UI + replay
 │   │   ├── dashboard_html.go       # Self-contained inspector single-page UI
 │   │   └── dashboard_test.go       # ring buffer, field capture, listing, body cap
@@ -366,7 +368,7 @@ Reconnection loop with exponential backoff: 1s → 2s → 4s → ... → 30s max
 
 **`--add` / `--del` modes:** instead of starting a tunnel, the process discovers running instances by scanning `vlgr-client-*.ctl` files in the temp dir (stale files from dead instances are removed), then sends `ADD`/`DEL` over the control socket. With one instance the command applies directly; with several, a console menu lists each instance (pid + its current forwards from `LIST`) to choose the target — Ctrl+C cancels. These flags must be used alone: combining `--add`/`--del` with each other or any other flag is an error.
 
-**`--tray` mode:** the systray loop owns the main goroutine while the reconnect loop runs beside it. Each instance gets its own tray icon (a base64-embedded diagonal arrow — PNG on Linux, ICO on Windows). The menu shows the active forwards (each with *Open in browser* and *Remove forward*), an *Add forward…* item that opens a native input dialog (`<port> [subdomain]`), and *Quit*. The menu refreshes automatically whenever the set of forwards changes, including changes made via `--add`/`--del` from another terminal. Supported on Windows and Linux (zenity or kdialog needed for the add dialog); on macOS builds the flag exits with an error to keep cross-compilation cgo-free.
+**`--tray` mode:** the systray loop owns the main goroutine while the reconnect loop runs beside it. Each instance gets its own tray icon (a base64-embedded diagonal arrow — PNG on Linux, ICO on Windows). The menu shows the active forwards (each with *Open in browser* — disabled for raw TCP/TLS tunnels, which a browser cannot open — and *Remove forward*), an *Add forward…* item that opens a native input dialog (`<port> [subdomain]`), an *About VLGR…* item showing the same application info as `--version`, and *Quit*. The menu refreshes automatically whenever the set of forwards changes, including changes made via `--add`/`--del` from another terminal. Supported on Windows and Linux (zenity or kdialog needed for the add and about dialogs); on macOS builds the flag exits with an error to keep cross-compilation cgo-free.
 
 ---
 
@@ -467,7 +469,7 @@ External user requests `GET https://abc123.tunnel.domain.com/api/status`:
 | `--ssh-ports` | | | Public TCP port range for SSH remote forwards, e.g. `20200-20300` |
 | `--ssh-hostkey` | | | Path to persist the SSH host key (empty = ephemeral per start) |
 | `--autoupdate` | | `false` | Poll GitHub releases and self-update in the background |
-| `--version` | `-v` | | Show version and exit |
+| `--version` | `-v` | | Show application info (version, commit, build date, platform, repo) and exit |
 | `--help` | `-h` | | Show help with usage examples |
 
 **Self-update.** With `--autoupdate` the server polls GitHub releases hourly
@@ -518,7 +520,7 @@ per host.
 | `--autoupdate` | | `false` | Poll GitHub releases and self-update in the background |
 | `--add` | | | Add a port with subdomain to a running instance: `"<port> <subdomain>"` — must be used alone |
 | `--del` | | | Remove a port forward (and its subdomain) from a running instance: `<port>` — must be used alone |
-| `--version` | `-v` | | Show version and exit |
+| `--version` | `-v` | | Show application info (version, commit, build date, platform, repo) and exit |
 | `--help` | `-h` | | Show help with usage examples |
 
 At least one of `--ports` or `--tcp` is required.
@@ -760,3 +762,11 @@ void loop() { ws.loop(); }
 2. Set `ssid`, `password`, `serverHost`, and `authToken`.
 3. Flash to ESP32. Open Serial Monitor — you'll see `ready: <url>`.
 4. Access device from anywhere at `https://<url>`.
+
+---
+
+## License
+
+MIT © 2026 [Ildar Latypov](https://github.com/varmtlys) &lt;varmtlys@gmail.com&gt;
+
+Full text in [LICENSE](LICENSE). The same notice is shown by `vlgr-client --version` and by *About VLGR…* in the tray menu.

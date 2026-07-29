@@ -4,6 +4,7 @@ package client
 
 import (
 	"fmt"
+	"log"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -22,6 +23,18 @@ func promptInput(title, prompt string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// showMessage displays a native message box.
+func showMessage(title, text string) {
+	script := fmt.Sprintf(
+		"Add-Type -AssemblyName Microsoft.VisualBasic; [void][Microsoft.VisualBasic.Interaction]::MsgBox(%s, 0, %s)",
+		psQuote(text), psQuote(title))
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	if err := cmd.Run(); err != nil {
+		log.Printf("[tray] message dialog: %v", err)
+	}
 }
 
 func psQuote(s string) string {
